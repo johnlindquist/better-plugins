@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = ROOT / "hooks" / "capture_pre_tool_use.js"
 ANALYZE = ROOT / "scripts" / "better_tools.py"
+SKILL = ROOT / "skills" / "toolsmith" / "SKILL.md"
+README = ROOT.parents[1] / "README.md"
 
 
 class BetterToolsTests(unittest.TestCase):
@@ -79,6 +81,7 @@ class BetterToolsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Toolsmith Corpus Summary", result.stdout)
             self.assertIn("prefer `rg`", result.stdout)
+            self.assertNotIn("Research Phase Guidance", result.stdout)
 
     def test_index_collapses_duplicate_tool_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -287,6 +290,8 @@ class BetterToolsTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("web-app/front-end tasks lack browser", result.stdout)
+            self.assertIn("Research Phase Guidance", result.stdout)
+            self.assertIn("recommend`, `defer`, or `reject", result.stdout)
 
     def test_mixed_native_and_web_tasks_are_recommended_per_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -355,6 +360,44 @@ class BetterToolsTests(unittest.TestCase):
             self.assertNotIn("should-not-leak", data)
             self.assertNotIn("should-not-leak", state)
             self.assertIn("<redacted>", data)
+
+    def test_skill_contains_external_research_contract(self) -> None:
+        text = SKILL.read_text()
+        required = [
+            "Research Phase gate",
+            "observed gap in one sentence",
+            "installed/current local tools",
+            "current primary sources",
+            "official docs",
+            "quality bar",
+            "recency bar by domain",
+            "AI/LLM/agent tooling",
+            "recommend",
+            "defer",
+            "reject",
+            "Do not auto-install external candidates",
+            "Candidate Tools",
+            "Source Type",
+            "Recency Evidence",
+            "Install/Use Path",
+            "Verification",
+        ]
+        for needle in required:
+            self.assertIn(needle, text)
+
+    def test_readme_documents_research_phase_for_users(self) -> None:
+        text = README.read_text()
+        required = [
+            "Research Phase",
+            "observed gap in one sentence",
+            "installed/current local tools",
+            "current primary sources",
+            "official docs",
+            "recommend`, `defer`, or `reject",
+            "verification command or runtime proof",
+        ]
+        for needle in required:
+            self.assertIn(needle, text)
 
 
 if __name__ == "__main__":

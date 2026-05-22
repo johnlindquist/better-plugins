@@ -43,7 +43,25 @@ ls
 find .. -maxdepth 2 -name AGENTS.md -o -name package.json -o -name pyproject.toml -o -name Cargo.toml
 ```
 
-3. If the user asks for researched tool recommendations, browse current official docs or primary sources for the candidate tools before recommending them.
+3. Run a Research Phase before recommending tools, plugins, skills, scripts, MCP servers, or external projects that are not already installed.
+
+Research Phase gate:
+
+- First state the observed gap in one sentence, grounded in the corpus and current project. If you cannot state the gap clearly, label the item `defer` and do not research a tool list.
+- Separate `installed/current local tools` from `external candidates`. Check the local environment, plugin cache, project scripts, repo dependencies, and existing commands before proposing anything new.
+- For unfamiliar installed CLI tools, run harmless local discovery first, such as `<tool> --help`, `<tool> help`, or `<tool> --version`, and summarize only relevant capabilities.
+- When web/search is needed for external candidates, use current primary sources: official docs, vendor docs, official GitHub repositories, package registry pages, release notes, or standards docs. Do not rely on blog posts, SEO lists, or stale tutorials as the main source.
+- Apply the quality bar: the candidate must fit the observed gap, have an explicit install/use path, show maintenance or stability evidence, expose a verification/smoke path, and have acceptable permissions/auth/security risk for the user's workflow.
+- Apply the recency bar by domain:
+  - AI/LLM/agent tooling: source or release evidence from the last 3-6 months unless the tool is the official stable API.
+  - Browser/front-end/test tooling: docs or release evidence from the last 6-12 months.
+  - CLI/dev tooling and MCP servers: maintenance, release, or compatibility evidence from the last 12 months.
+  - macOS/system APIs, POSIX/Unix tools, and standards: older primary docs are acceptable when the API/tool is stable; third-party wrappers or examples still need recent maintenance evidence.
+- Assign a decision label to each candidate:
+  - `recommend`: strong local fit, current primary source, clear install/use path, and concrete verification.
+  - `defer`: plausible fit but weak signal, unclear local need, insufficient source recency, or missing verification path.
+  - `reject`: does not fit the observed gap, is stale/unmaintained for the domain, has unacceptable permissions/security risk, or duplicates an installed capability.
+- Do not auto-install external candidates unless the user explicitly asks. Provide the install command and a falsifiable verification command or runtime proof instead.
 
 4. For unfamiliar CLI tools already present in the corpus or current project, inspect their local capabilities before recommending replacements or wrappers. Prefer harmless help/version probes:
 
@@ -76,6 +94,7 @@ For native macOS Swift/AppKit/Accessibility work, recommend native proof instead
 - the smallest better tool or instruction
 - the exact file(s) to change
 - a falsifiable verification command or runtime proof
+- if external candidates were researched, the decision label, source type, recency evidence, local-fit rationale, install/use path, and verification path
 
 ## Output Shape
 
@@ -90,6 +109,16 @@ Prefer this structure:
 
 ## Blindspots
 <missing tools or verification paths inferred from project type and logs>
+
+## Research Phase
+Observed gap: <one sentence grounded in corpus/project evidence>
+Installed/current local tools checked: <tools/scripts/plugins/deps already available, or "none found">
+External research needed: <yes/no and why>
+
+## Candidate Tools
+| Decision | Candidate | Source Type | Recency Evidence | Local Fit | Install/Use Path | Verification |
+| --- | --- | --- | --- | --- | --- | --- |
+| recommend/defer/reject | <name> | <official docs/GitHub/package registry/local --help> | <date/version/stability note> | <why it fits or does not> | <command or none> | <smoke/runtime proof> |
 
 ## AGENTS.md Suggestions
 <patch-ready bullets, or say none>

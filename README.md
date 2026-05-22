@@ -60,6 +60,8 @@ The raw daily JSONL lives under `events/`; the compact deduped index lives at `i
 
 Toolsmith captures `UserPromptSubmit` events so recommendations can understand intent before judging tool usage. For example, a native macOS Swift task should not produce a generic browser-verification recommendation just because the original prompt mentioned a website. A URL in a prompt is treated as external context unless the prompt or commands also show web-app, front-end, browser, DOM, or localhost UI intent.
 
+Toolsmith also has a Research Phase for recommendations that involve tools, plugins, skills, scripts, MCP servers, or external projects that are not already installed. The phase starts only after Toolsmith can state the observed gap in one sentence. It checks installed/current local tools first, then uses current primary sources such as official docs, official repositories, package registries, release notes, or standards docs for external candidates. Candidate decisions are labeled `recommend`, `defer`, or `reject`, with recency evidence, local-fit rationale, install/use path, and a verification command or runtime proof.
+
 The hook writes a live health index at:
 
 ```text

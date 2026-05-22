@@ -47,6 +47,13 @@ WEB_APP_SIGNALS = {
     ".jsx": 2,
     "npm run dev": 3,
 }
+RESEARCH_PHASE_GUIDANCE = [
+    "State the observed gap in one sentence before researching external candidates.",
+    "Check installed/current local tools first, including project scripts, plugin cache, dependencies, and harmless `<tool> --help` or `--version` probes.",
+    "Use primary sources for external candidates: official docs, official GitHub repositories, package registries, release notes, or standards docs.",
+    "Apply recency expectations: AI/agent tools 3-6 months, browser/front-end tools 6-12 months, CLI/dev tools and MCP servers 12 months, stable macOS/POSIX/standards primary docs may be older.",
+    "Label each candidate `recommend`, `defer`, or `reject` and include install/use plus falsifiable verification before suggesting adoption.",
+]
 
 
 def locate_data_dir(override: Optional[str] = None) -> Path:
@@ -361,6 +368,13 @@ def recommendations(summary: dict[str, Any]) -> list[str]:
     return recs
 
 
+def needs_research_phase(recs: list[str]) -> bool:
+    return any(
+        rec.startswith(("blindspot:", "script:", "skill:", "MCP/tool:"))
+        for rec in recs
+    )
+
+
 def print_doctor(root: Path) -> None:
     events = list(iter_jsonl(event_files(root)))
     errors = list(iter_jsonl(error_files(root)))
@@ -386,6 +400,7 @@ def print_doctor(root: Path) -> None:
 def render_summary(root: Path, days: int) -> str:
     events = recent_events(root, days)
     summary = summarize(events)
+    recs = recommendations(summary)
     lines = [
         "# Toolsmith Corpus Summary",
         "",
@@ -441,8 +456,19 @@ def render_summary(root: Path, days: int) -> str:
             lines.append(f"  Example: `{example}`")
     lines.append("")
     lines.append("## Recommendations")
-    for rec in recommendations(summary):
+    for rec in recs:
         lines.append(f"- {rec}")
+    if needs_research_phase(recs):
+        lines.extend([
+            "",
+            "## Research Phase Guidance",
+        ])
+        for item in RESEARCH_PHASE_GUIDANCE:
+            lines.append(f"- {item}")
+        lines.extend([
+            "",
+            "Candidate output fields: decision, candidate, source type, recency evidence, local fit, install/use path, verification.",
+        ])
     return "\n".join(lines) + "\n"
 
 
