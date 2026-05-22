@@ -87,6 +87,16 @@ def command_text(event: dict[str, Any]) -> str:
     return ""
 
 
+def prompt_text(event: dict[str, Any]) -> str:
+    prompt = event.get("prompt") if isinstance(event.get("prompt"), dict) else {}
+    if isinstance(prompt.get("text"), str):
+        return prompt["text"]
+    intent = event.get("intent") if isinstance(event.get("intent"), dict) else {}
+    if isinstance(intent.get("prompt_excerpt"), str):
+        return intent["prompt_excerpt"]
+    return ""
+
+
 def normalize_command(command: str) -> str:
     value = re.sub(r'"[^"]*"', '"<str>"', command)
     value = re.sub(r"'[^']*'", "'<str>'", value)
@@ -97,14 +107,23 @@ def normalize_command(command: str) -> str:
 
 
 def summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
+    records = Counter()
     tools = Counter()
     families = Counter()
     projects = Counter()
     commands = Counter()
     normalized = Counter()
     input_hashes = Counter()
+    prompts = Counter()
     examples: dict[str, str] = {}
     for event in events:
+        kind = str(event.get("kind") or "unknown")
+        records[kind] += 1
+        prompt = prompt_text(event)
+        if prompt:
+            prompts[prompt] += 1
+        if kind != "tool_call":
+            continue
         tool = event.get("tool") if isinstance(event.get("tool"), dict) else {}
         project = event.get("project") if isinstance(event.get("project"), dict) else {}
         tools[str(tool.get("name") or "unknown")] += 1
@@ -122,28 +141,39 @@ def summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
             examples.setdefault(pattern, first_line)
     return {
         "records": len(events),
+        "record_kinds": records,
         "tools": tools,
         "families": families,
         "projects": projects,
         "commands": commands,
         "patterns": normalized,
         "input_hashes": input_hashes,
+        "prompts": prompts,
         "examples": examples,
     }
+
+
+def prompt_has_any(summary: dict[str, Any], terms: tuple[str, ...]) -> bool:
+    text = "\n".join(summary["prompts"].keys()).lower()
+    return any(term in text for term in terms)
 
 
 def recommendations(summary: dict[str, Any]) -> list[str]:
     recs: list[str] = []
     commands = "\n".join(summary["commands"].keys())
     tools = summary["tools"]
+    web_intent = prompt_has_any(summary, ("browser", "website", "web app", "frontend", "localhost", "page", "dom", "screenshot"))
+    native_intent = prompt_has_any(summary, ("macos", "swift", "appkit", "accessibility", "axuielement", "nswindow", "nspanel", "textedit", "native"))
     if "grep" in commands and "rg" not in commands:
         recs.append("AGENTS.md: prefer `rg` and `rg --files` over `grep`/`find` for repo search.")
     if "jq " in commands or "python3 - <<" in commands:
         recs.append("script: repeated structured-data shell analysis is a good candidate for a small repo-local helper.")
     if any("git status" in command for command in summary["commands"]):
         recs.append("script: consider a repo-status helper that prints branch, dirty files, and untracked files consistently.")
-    if not any("browser" in tool.lower() or "web" in tool.lower() for tool in tools):
+    if web_intent and not native_intent and not any("browser" in tool.lower() or "web" in tool.lower() for tool in tools):
         recs.append("blindspot: no browser/web verification tools appear in the captured PreToolUse corpus.")
+    if native_intent and any("swift " in command or "xcodebuild" in command for command in summary["commands"]):
+        recs.append("blindspot: native UI work needs runtime proof from the target app, not generic browser verification.")
     if summary["records"] < 10:
         recs.append("data quality: collect more events before making durable tooling decisions.")
     if not recs:
@@ -161,6 +191,8 @@ def print_doctor(root: Path) -> None:
     print(f"Events: {len(event_files(root))} files, {len(events)} records")
     print(f"Errors: {len(error_files(root))} files, {len(errors)} records")
     print(f"Newest event: {newest}")
+    kind_summary = ", ".join(f"{name}={count}" for name, count in summary["record_kinds"].most_common(10))
+    print(f"Record kinds: {kind_summary or 'none'}")
     top_tools = ", ".join(f"{name}={count}" for name, count in summary["tools"].most_common(10))
     print(f"Top tools: {top_tools or 'none'}")
     duplicate_total = sum(count - 1 for count in summary["input_hashes"].values() if count > 1)
@@ -180,10 +212,23 @@ def render_summary(root: Path, days: int) -> str:
         f"Data root: `{root}`",
         f"Window: last {days} days",
         f"Records: {summary['records']}",
+        f"Tool records: {summary['record_kinds'].get('tool_call', 0)}",
+        f"Prompt records: {summary['record_kinds'].get('user_prompt', 0)}",
         f"Unique tool inputs: {len(summary['input_hashes'])}",
         "",
-        "## Top Tools",
+        "## Recent User Intent",
     ]
+    for prompt, _count in summary["prompts"].most_common(5):
+        clean = " ".join(prompt.split())
+        if len(clean) > 220:
+            clean = clean[:217] + "..."
+        lines.append(f"- {clean}")
+    if not summary["prompts"]:
+        lines.append("- No prompt intent captured yet.")
+    lines.extend([
+        "",
+        "## Top Tools",
+    ])
     for name, count in summary["tools"].most_common(15):
         lines.append(f"- `{name}`: {count}")
     lines.append("")
@@ -213,10 +258,16 @@ def compact_index(root: Path, days: int) -> dict[str, Any]:
         "window_days": days,
         "source_event_files": [str(path) for path in event_files(root)],
         "records": summary["records"],
+        "tool_records": summary["record_kinds"].get("tool_call", 0),
+        "prompt_records": summary["record_kinds"].get("user_prompt", 0),
         "unique_tool_inputs": len(summary["input_hashes"]),
         "duplicate_tool_input_calls": sum(count - 1 for count in summary["input_hashes"].values() if count > 1),
         "top_tools": summary["tools"].most_common(50),
         "top_projects": summary["projects"].most_common(50),
+        "recent_prompts": [
+            {"prompt": prompt, "count": count}
+            for prompt, count in summary["prompts"].most_common(20)
+        ],
         "top_command_patterns": [
             {
                 "pattern": pattern,

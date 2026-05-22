@@ -15,7 +15,7 @@ The companion `PreToolUse` hook stores a rolling corpus under `$PLUGIN_DATA` whe
 ~/.codex/plugin-data/toolsmith/
 ```
 
-The raw store is a capped daily JSONL spool under `events/`. Do not load raw JSONL into the conversation by default. The hook updates `indexes/tool-index.json` automatically, and `better_tools.py index` can regenerate a compact deduped index. Use the index and summaries because they collapse duplicate calls by input hash and normalized command pattern.
+The raw store is a capped daily JSONL spool under `events/`. It includes prompt-intent records from `UserPromptSubmit` plus tool-call records from `PreToolUse`. Do not load raw JSONL into the conversation by default. The hook updates `indexes/tool-index.json` automatically, and `better_tools.py index` can regenerate a compact deduped index. Use the index and summaries because they collapse duplicate calls by input hash and normalized command pattern while preserving enough prompt context to avoid intent-blind recommendations.
 
 ## Workflow
 
@@ -30,7 +30,7 @@ python3 "$PLUGIN_ROOT/scripts/better_tools.py" summary --days 30
 If `$PLUGIN_ROOT` is not available in the current shell, use the installed plugin path or the development checkout:
 
 ```bash
-python3 /Users/johnlindquist/dev/dev-build-plugins/plugins/toolsmith/scripts/better_tools.py summary --days 30
+python3 /Users/johnlindquist/dev/better-plugins/plugins/toolsmith/scripts/better_tools.py summary --days 30
 ```
 
 2. Use the report as evidence, not as the final answer. Inspect the current project before making durable recommendations:

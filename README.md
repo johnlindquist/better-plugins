@@ -1,10 +1,10 @@
-# dev.build Plugins
+# Better Plugins
 
-Official Codex plugins from dev.build.
+Codex plugins from John Lindquist for making agents more effective.
 
 ## Plugins
 
-- `toolsmith`: observes supported Codex tool calls locally and turns repeated patterns into practical tool, skill, script, and AGENTS.md improvements.
+- `toolsmith`: observes supported Codex prompts and tool calls locally, then turns repeated patterns into practical tool, skill, script, and AGENTS.md improvements.
 
 ## Install
 
@@ -17,11 +17,11 @@ plugins = true
 plugin_hooks = true
 ```
 
-Add the dev.build marketplace and install Toolsmith:
+Add the Better Plugins marketplace and install Toolsmith:
 
 ```bash
-codex plugin marketplace add johnlindquist/dev-build-plugins
-codex plugin add toolsmith@dev-build
+codex plugin marketplace add johnlindquist/better-plugins
+codex plugin add toolsmith@better-plugins
 ```
 
 Restart Codex after installing or updating plugins. Open `/plugins` to confirm the plugin is installed and enabled, then open `/hooks` to review/trust bundled hooks if Codex asks.
@@ -29,17 +29,17 @@ Restart Codex after installing or updating plugins. Open `/plugins` to confirm t
 ## Local Development Install
 
 ```bash
-git clone https://github.com/johnlindquist/dev-build-plugins.git
-cd dev-build-plugins
+git clone https://github.com/johnlindquist/better-plugins.git
+cd better-plugins
 codex plugin marketplace add "$PWD"
-codex plugin add toolsmith@dev-build
+codex plugin add toolsmith@better-plugins
 ```
 
 After local edits, reinstall the plugin so Codex refreshes its cached copy:
 
 ```bash
-codex plugin remove toolsmith@dev-build
-codex plugin add toolsmith@dev-build
+codex plugin remove toolsmith@better-plugins
+codex plugin add toolsmith@better-plugins
 ```
 
 ## Toolsmith Data
@@ -47,7 +47,7 @@ codex plugin add toolsmith@dev-build
 Toolsmith writes to `$PLUGIN_DATA` when Codex provides it. In current Codex plugin installs this is typically:
 
 ```text
-~/.codex/plugins/data/dev-build-toolsmith/
+~/.codex/plugins/data/better-plugins-toolsmith/
 ```
 
 It also writes a locator fallback under:
@@ -57,6 +57,8 @@ It also writes a locator fallback under:
 ```
 
 The raw daily JSONL lives under `events/`; the compact deduped index lives at `indexes/tool-index.json`.
+
+Toolsmith captures `UserPromptSubmit` events so recommendations can understand intent before judging tool usage. For example, a native macOS Swift task should not produce a generic browser-verification recommendation just because the original prompt mentioned a website.
 
 ## Checks
 

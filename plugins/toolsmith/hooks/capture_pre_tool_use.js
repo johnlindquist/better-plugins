@@ -11,6 +11,7 @@ const MAX_STDIN_BYTES = intEnv("BETTER_TOOLS_MAX_STDIN_BYTES", 4 * 1024 * 1024);
 const MAX_RECORD_BYTES = intEnv("BETTER_TOOLS_MAX_RECORD_BYTES", 256 * 1024);
 const MAX_INDEX_PATTERNS = intEnv("BETTER_TOOLS_MAX_INDEX_PATTERNS", 2000);
 const MAX_INDEX_INPUT_HASHES = intEnv("BETTER_TOOLS_MAX_INDEX_INPUT_HASHES", 10000);
+const MAX_PROMPT_CHARS = intEnv("TOOLSMITH_MAX_PROMPT_CHARS", 4000);
 const RETENTION_DAYS = intEnv("BETTER_TOOLS_RETENTION_DAYS", 90);
 const MAX_TOTAL_BYTES = intEnv("BETTER_TOOLS_MAX_BYTES", 250 * 1000 * 1000);
 const SECRET_KEY_RE = /(api[_-]?key|token|secret|password|passwd|authorization|bearer|client[_-]?secret|cookie|credential)/i;
@@ -206,7 +207,107 @@ function trimRecord(record) {
   return record;
 }
 
-function buildRecord(input, rawMeta, dataRoot) {
+function promptStatePath(dataRoot) {
+  return path.join(dataRoot.root, "state", "recent-prompts.json");
+}
+
+function promptKey(sessionId, turnId) {
+  return `${sessionId || ""}\u001f${turnId || ""}`;
+}
+
+function readPromptState(dataRoot) {
+  try {
+    return JSON.parse(fs.readFileSync(promptStatePath(dataRoot), "utf8"));
+  } catch (_) {
+    return { schema_version: 1, prompts: {} };
+  }
+}
+
+function writePromptState(dataRoot, state) {
+  try {
+    const statePath = promptStatePath(dataRoot);
+    mkdirp(path.dirname(statePath));
+    const entries = Object.entries(state.prompts || {})
+      .sort((a, b) => String(b[1].observed_at || "").localeCompare(String(a[1].observed_at || "")))
+      .slice(0, 200);
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({ schema_version: 1, prompts: Object.fromEntries(entries) }, null, 2)}\n`,
+      "utf8"
+    );
+  } catch (_) {}
+}
+
+function promptFromInput(input) {
+  for (const key of ["prompt", "user_prompt", "message"]) {
+    if (typeof input[key] === "string") return input[key];
+  }
+  return "";
+}
+
+function buildPromptRecord(input, rawMeta, dataRoot) {
+  const counters = { redacted_count: 0, truncated_count: 0 };
+  const rawPrompt = promptFromInput(input);
+  const redactedPrompt = redactString(rawPrompt, counters).slice(0, MAX_PROMPT_CHARS);
+  const promptHash = sha(rawPrompt);
+  const record = {
+    schema_version: 1,
+    kind: "user_prompt",
+    observed_at: nowIso(),
+    plugin: { name: PLUGIN_NAME, version: PLUGIN_VERSION, hook: HOOK_NAME },
+    hook: {
+      event_name: String(input.hook_event_name || "UserPromptSubmit"),
+      permission_mode: input.permission_mode || null,
+      model: input.model || null,
+    },
+    ids: {
+      event_id: sha([input.session_id || "", input.turn_id || "", "user_prompt", rawPrompt].join("\u001f")),
+      session_id: input.session_id || null,
+      turn_id: input.turn_id || null,
+      tool_use_id: null,
+    },
+    prompt: {
+      text: redactedPrompt,
+      prompt_hash: promptHash,
+      prompt_bytes: Buffer.byteLength(rawPrompt, "utf8"),
+      prompt_truncated: rawPrompt.length > redactedPrompt.length,
+    },
+    redaction: {
+      enabled: true,
+      rules_version: "2026-05-21",
+      redacted_count: counters.redacted_count,
+      truncated_count: counters.truncated_count + (rawPrompt.length > redactedPrompt.length ? 1 : 0),
+    },
+    capture: {
+      data_root_source: dataRoot.source,
+      raw_stdin_bytes: rawMeta.bytes,
+      parse_status: "ok",
+    },
+  };
+  const state = readPromptState(dataRoot);
+  state.prompts = state.prompts || {};
+  state.prompts[promptKey(input.session_id || null, input.turn_id || null)] = {
+    observed_at: record.observed_at,
+    session_id: input.session_id || null,
+    turn_id: input.turn_id || null,
+    prompt_hash: promptHash,
+    text: redactedPrompt,
+  };
+  writePromptState(dataRoot, state);
+  return record;
+}
+
+function recentPromptFor(input, dataRoot) {
+  const state = readPromptState(dataRoot);
+  const prompts = state.prompts || {};
+  const exact = prompts[promptKey(input.session_id || null, input.turn_id || null)];
+  if (exact) return exact;
+  return Object.values(prompts)
+    .filter((prompt) => prompt && prompt.session_id === (input.session_id || null))
+    .sort((a, b) => String(b.observed_at || "").localeCompare(String(a.observed_at || "")))[0] || null;
+}
+
+function buildToolRecord(input, rawMeta, dataRoot) {
   const counters = { redacted_count: 0, truncated_count: 0 };
   const toolInputRaw = input.tool_input || {};
   const toolInput = redact(toolInputRaw, counters);
@@ -216,6 +317,7 @@ function buildRecord(input, rawMeta, dataRoot) {
   const projectSource = gitRoot || cwd || "unknown-project";
   const command = commandFromInput(toolInput);
   const rawInputJson = JSON.stringify(toolInputRaw);
+  const prompt = recentPromptFor(input, dataRoot);
   return trimRecord({
     schema_version: 1,
     kind: "tool_call",
@@ -240,6 +342,11 @@ function buildRecord(input, rawMeta, dataRoot) {
       project_key: sha(projectSource),
       project_name: path.basename(gitRoot || cwd || "unknown"),
     },
+    intent: prompt ? {
+      prompt_hash: prompt.prompt_hash || null,
+      prompt_excerpt: prompt.text || "",
+      prompt_observed_at: prompt.observed_at || null,
+    } : null,
     tool: {
       name: toolName,
       family: classifyTool(toolName),
@@ -262,6 +369,12 @@ function buildRecord(input, rawMeta, dataRoot) {
       parse_status: "ok",
     },
   });
+}
+
+function buildRecord(input, rawMeta, dataRoot) {
+  const eventName = String(input.hook_event_name || "PreToolUse");
+  if (eventName === "UserPromptSubmit") return buildPromptRecord(input, rawMeta, dataRoot);
+  return buildToolRecord(input, rawMeta, dataRoot);
 }
 
 function buildError(error, rawMeta, dataRoot) {
@@ -297,7 +410,7 @@ function incrementMap(map, key, limit) {
 }
 
 function updateCompactIndex(dataRoot, record) {
-  if (!record || record.kind !== "tool_call") return;
+  if (!record) return;
   try {
     const indexPath = path.join(dataRoot.root, "indexes", "tool-index.json");
     mkdirp(path.dirname(indexPath));
@@ -309,6 +422,12 @@ function updateCompactIndex(dataRoot, record) {
     index.generated_at = nowIso();
     index.window = "incremental";
     index.records = Number(index.records || 0) + 1;
+    index.tool_records = Number(index.tool_records || 0) + (record.kind === "tool_call" ? 1 : 0);
+    index.prompt_records = Number(index.prompt_records || 0) + (record.kind === "user_prompt" ? 1 : 0);
+    if (record.kind !== "tool_call") {
+      fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+      return;
+    }
     index.top_tools = index.top_tools || {};
     index.top_projects = index.top_projects || {};
     index.input_hash_counts = index.input_hash_counts || {};
