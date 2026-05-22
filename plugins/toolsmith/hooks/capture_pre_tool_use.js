@@ -7,11 +7,15 @@ const crypto = require("crypto");
 const PLUGIN_NAME = "toolsmith";
 const PLUGIN_VERSION = "0.1.0";
 const HOOK_NAME = "capture_pre_tool_use";
+const EVENT_SCHEMA_VERSION = 2;
 const MAX_STDIN_BYTES = intEnv("BETTER_TOOLS_MAX_STDIN_BYTES", 4 * 1024 * 1024);
 const MAX_RECORD_BYTES = intEnv("BETTER_TOOLS_MAX_RECORD_BYTES", 256 * 1024);
 const MAX_INDEX_PATTERNS = intEnv("BETTER_TOOLS_MAX_INDEX_PATTERNS", 2000);
 const MAX_INDEX_INPUT_HASHES = intEnv("BETTER_TOOLS_MAX_INDEX_INPUT_HASHES", 10000);
-const MAX_PROMPT_CHARS = intEnv("TOOLSMITH_MAX_PROMPT_CHARS", 4000);
+const MAX_PROMPT_EXCERPT_CHARS = intEnv("TOOLSMITH_MAX_PROMPT_EXCERPT_CHARS", 800);
+const MAX_TOOL_PROMPT_EXCERPT_CHARS = intEnv("TOOLSMITH_MAX_TOOL_PROMPT_EXCERPT_CHARS", 280);
+const PROMPT_STATE_TTL_MS = intEnv("TOOLSMITH_PROMPT_STATE_TTL_MS", 6 * 60 * 60 * 1000);
+const CAPTURE_PROMPT_TEXT = process.env.TOOLSMITH_CAPTURE_PROMPT_TEXT !== "0";
 const RETENTION_DAYS = intEnv("BETTER_TOOLS_RETENTION_DAYS", 90);
 const MAX_TOTAL_BYTES = intEnv("BETTER_TOOLS_MAX_BYTES", 250 * 1000 * 1000);
 const SECRET_KEY_RE = /(api[_-]?key|token|secret|password|passwd|authorization|bearer|client[_-]?secret|cookie|credential)/i;
@@ -24,10 +28,6 @@ function intEnv(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-function sha(value) {
-  return `sha256:${crypto.createHash("sha256").update(String(value)).digest("hex")}`;
-}
-
 function nowIso() {
   return new Date().toISOString();
 }
@@ -38,6 +38,36 @@ function dayStamp() {
 
 function mkdirp(dir) {
   fs.mkdirSync(dir, { recursive: true });
+}
+
+function hashSecretPath(dataRoot) {
+  return path.join(dataRoot.root, "state", "hash-secret");
+}
+
+function getHashSecret(dataRoot) {
+  const file = hashSecretPath(dataRoot);
+  try {
+    return fs.readFileSync(file);
+  } catch (_) {
+    mkdirp(path.dirname(file));
+    const secret = crypto.randomBytes(32);
+    try {
+      fs.writeFileSync(file, secret, { mode: 0o600 });
+    } catch (_) {
+      fs.writeFileSync(file, secret);
+    }
+    return secret;
+  }
+}
+
+function localHash(dataRoot, value) {
+  return `hmac-sha256:${crypto.createHmac("sha256", getHashSecret(dataRoot)).update(String(value)).digest("hex")}`;
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
 }
 
 function stableHomeFallback() {
@@ -223,16 +253,31 @@ function readPromptState(dataRoot) {
   }
 }
 
+function parseTimeMs(value) {
+  const ms = Date.parse(String(value || ""));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function promptAgeMs(prompt) {
+  const ms = parseTimeMs(prompt && prompt.observed_at);
+  return ms ? Date.now() - ms : Number.POSITIVE_INFINITY;
+}
+
+function prunePromptState(prompts) {
+  const entries = Object.entries(prompts || {})
+    .filter(([, prompt]) => promptAgeMs(prompt) <= PROMPT_STATE_TTL_MS)
+    .sort((a, b) => String(b[1].observed_at || "").localeCompare(String(a[1].observed_at || "")))
+    .slice(0, 200);
+  return Object.fromEntries(entries);
+}
+
 function writePromptState(dataRoot, state) {
   try {
     const statePath = promptStatePath(dataRoot);
     mkdirp(path.dirname(statePath));
-    const entries = Object.entries(state.prompts || {})
-      .sort((a, b) => String(b[1].observed_at || "").localeCompare(String(a[1].observed_at || "")))
-      .slice(0, 200);
     fs.writeFileSync(
       statePath,
-      `${JSON.stringify({ schema_version: 1, prompts: Object.fromEntries(entries) }, null, 2)}\n`,
+      `${JSON.stringify({ schema_version: EVENT_SCHEMA_VERSION, prompts: prunePromptState(state.prompts || {}) }, null, 2)}\n`,
       "utf8"
     );
   } catch (_) {}
@@ -247,13 +292,18 @@ function promptFromInput(input) {
 
 function buildPromptRecord(input, rawMeta, dataRoot) {
   const counters = { redacted_count: 0, truncated_count: 0 };
+  const observedAt = nowIso();
   const rawPrompt = promptFromInput(input);
-  const redactedPrompt = redactString(rawPrompt, counters).slice(0, MAX_PROMPT_CHARS);
-  const promptHash = sha(rawPrompt);
+  const redactedFull = redactString(rawPrompt, counters);
+  const promptTruncated = redactedFull.length > MAX_PROMPT_EXCERPT_CHARS;
+  const excerpt = CAPTURE_PROMPT_TEXT ? redactedFull.slice(0, MAX_PROMPT_EXCERPT_CHARS) : "";
+  const promptHash = rawPrompt ? localHash(dataRoot, rawPrompt) : null;
+  const promptId = rawPrompt ? localHash(dataRoot, ["prompt", input.session_id || "", input.turn_id || "", promptHash].join("\u001f")) : null;
+  const taskId = localHash(dataRoot, ["task", input.session_id || "", input.turn_id || "", promptHash || observedAt].join("\u001f"));
   const record = {
-    schema_version: 1,
+    schema_version: EVENT_SCHEMA_VERSION,
     kind: "user_prompt",
-    observed_at: nowIso(),
+    observed_at: observedAt,
     plugin: { name: PLUGIN_NAME, version: PLUGIN_VERSION, hook: HOOK_NAME },
     hook: {
       event_name: String(input.hook_event_name || "UserPromptSubmit"),
@@ -261,22 +311,32 @@ function buildPromptRecord(input, rawMeta, dataRoot) {
       model: input.model || null,
     },
     ids: {
-      event_id: sha([input.session_id || "", input.turn_id || "", "user_prompt", rawPrompt].join("\u001f")),
+      event_id: localHash(dataRoot, [observedAt, input.session_id || "", input.turn_id || "", "user_prompt", promptHash || ""].join("\u001f")),
       session_id: input.session_id || null,
       turn_id: input.turn_id || null,
       tool_use_id: null,
+      prompt_id: promptId,
+      task_id: taskId,
+    },
+    task: {
+      task_id: taskId,
+      prompt_id: promptId,
     },
     prompt: {
-      text: redactedPrompt,
+      text: excerpt,
+      excerpt,
       prompt_hash: promptHash,
       prompt_bytes: Buffer.byteLength(rawPrompt, "utf8"),
-      prompt_truncated: rawPrompt.length > redactedPrompt.length,
+      prompt_truncated: promptTruncated,
+      capture_mode: CAPTURE_PROMPT_TEXT ? "excerpt" : "hash_only",
+      capture_status: rawPrompt ? "captured" : "missing",
+      payload_keys: rawPrompt ? undefined : Object.keys(input).slice(0, 50),
     },
     redaction: {
       enabled: true,
       rules_version: "2026-05-21",
       redacted_count: counters.redacted_count,
-      truncated_count: counters.truncated_count + (rawPrompt.length > redactedPrompt.length ? 1 : 0),
+      truncated_count: counters.truncated_count + (promptTruncated ? 1 : 0),
     },
     capture: {
       data_root_source: dataRoot.source,
@@ -284,27 +344,40 @@ function buildPromptRecord(input, rawMeta, dataRoot) {
       parse_status: "ok",
     },
   };
-  const state = readPromptState(dataRoot);
-  state.prompts = state.prompts || {};
-  state.prompts[promptKey(input.session_id || null, input.turn_id || null)] = {
-    observed_at: record.observed_at,
-    session_id: input.session_id || null,
-    turn_id: input.turn_id || null,
-    prompt_hash: promptHash,
-    text: redactedPrompt,
-  };
-  writePromptState(dataRoot, state);
+  if (rawPrompt) {
+    const state = readPromptState(dataRoot);
+    state.prompts = state.prompts || {};
+    state.prompts[promptKey(input.session_id || null, input.turn_id || null)] = {
+      observed_at: observedAt,
+      session_id: input.session_id || null,
+      turn_id: input.turn_id || null,
+      task_id: taskId,
+      prompt_id: promptId,
+      prompt_hash: promptHash,
+      text: excerpt,
+    };
+    writePromptState(dataRoot, state);
+  }
   return record;
 }
 
 function recentPromptFor(input, dataRoot) {
   const state = readPromptState(dataRoot);
-  const prompts = state.prompts || {};
-  const exact = prompts[promptKey(input.session_id || null, input.turn_id || null)];
-  if (exact) return exact;
-  return Object.values(prompts)
-    .filter((prompt) => prompt && prompt.session_id === (input.session_id || null))
+  const prompts = prunePromptState(state.prompts || {});
+  const sessionId = input.session_id || null;
+  const turnId = input.turn_id || null;
+  if (sessionId && turnId) {
+    const exact = prompts[promptKey(sessionId, turnId)];
+    if (exact) {
+      return { ...exact, link_method: "same_turn", link_confidence: 1.0, link_age_ms: promptAgeMs(exact) };
+    }
+  }
+  if (!sessionId) return null;
+  const recent = Object.values(prompts)
+    .filter((prompt) => prompt && prompt.session_id === sessionId)
+    .filter((prompt) => promptAgeMs(prompt) <= PROMPT_STATE_TTL_MS)
     .sort((a, b) => String(b.observed_at || "").localeCompare(String(a.observed_at || "")))[0] || null;
+  return recent ? { ...recent, link_method: "same_session_recent", link_confidence: 0.55, link_age_ms: promptAgeMs(recent) } : null;
 }
 
 function buildToolRecord(input, rawMeta, dataRoot) {
@@ -316,10 +389,10 @@ function buildToolRecord(input, rawMeta, dataRoot) {
   const gitRoot = findGitRoot(cwd);
   const projectSource = gitRoot || cwd || "unknown-project";
   const command = commandFromInput(toolInput);
-  const rawInputJson = JSON.stringify(toolInputRaw);
+  const rawInputJson = stableJson(toolInputRaw);
   const prompt = recentPromptFor(input, dataRoot);
   return trimRecord({
-    schema_version: 1,
+    schema_version: EVENT_SCHEMA_VERSION,
     kind: "tool_call",
     observed_at: nowIso(),
     plugin: { name: PLUGIN_NAME, version: PLUGIN_VERSION, hook: HOOK_NAME },
@@ -329,33 +402,39 @@ function buildToolRecord(input, rawMeta, dataRoot) {
       model: input.model || null,
     },
     ids: {
-      event_id: sha([input.session_id || "", input.turn_id || "", input.tool_use_id || "", toolName, rawInputJson].join("\u001f")),
+      event_id: localHash(dataRoot, [input.session_id || "", input.turn_id || "", input.tool_use_id || "", toolName, rawInputJson].join("\u001f")),
       session_id: input.session_id || null,
       turn_id: input.turn_id || null,
       tool_use_id: input.tool_use_id || null,
+      task_id: prompt ? prompt.task_id || null : null,
     },
     project: {
       cwd,
-      cwd_hash: cwd ? sha(cwd) : null,
+      cwd_hash: cwd ? localHash(dataRoot, cwd) : null,
       git_root: gitRoot,
-      git_root_hash: gitRoot ? sha(gitRoot) : null,
-      project_key: sha(projectSource),
+      git_root_hash: gitRoot ? localHash(dataRoot, gitRoot) : null,
+      project_key: localHash(dataRoot, projectSource),
       project_name: path.basename(gitRoot || cwd || "unknown"),
     },
-    intent: prompt ? {
+    task: prompt ? {
+      task_id: prompt.task_id || null,
+      prompt_id: prompt.prompt_id || null,
       prompt_hash: prompt.prompt_hash || null,
-      prompt_excerpt: prompt.text || "",
+      prompt_excerpt: (prompt.text || "").slice(0, MAX_TOOL_PROMPT_EXCERPT_CHARS),
       prompt_observed_at: prompt.observed_at || null,
+      link_method: prompt.link_method || null,
+      link_confidence: prompt.link_confidence || null,
+      link_age_ms: prompt.link_age_ms || null,
     } : null,
     tool: {
       name: toolName,
       family: classifyTool(toolName),
       input: toolInput,
-      input_hash: sha(rawInputJson),
+      input_hash: localHash(dataRoot, rawInputJson),
       input_bytes: Buffer.byteLength(rawInputJson, "utf8"),
       input_truncated: rawMeta.truncated,
       command,
-      command_hash: command ? sha(command) : null,
+      command_hash: command ? localHash(dataRoot, command) : null,
     },
     redaction: {
       enabled: true,
@@ -380,14 +459,14 @@ function buildRecord(input, rawMeta, dataRoot) {
 function buildError(error, rawMeta, dataRoot) {
   const counters = { redacted_count: 0, truncated_count: 0 };
   return {
-    schema_version: 1,
+    schema_version: EVENT_SCHEMA_VERSION,
     kind: "hook_error",
     observed_at: nowIso(),
     plugin: { name: PLUGIN_NAME, version: PLUGIN_VERSION, hook: HOOK_NAME },
     error: {
       type: rawMeta.truncated ? "stdin_too_large_or_parse_error" : "stdin_parse_error",
       message: String(error && error.message ? error.message : error),
-      raw_sha256: sha(rawMeta.raw || ""),
+      raw_hash: localHash(dataRoot, rawMeta.raw || ""),
       raw_preview: redactString((rawMeta.raw || "").slice(0, 2000), counters),
     },
     capture: {
@@ -409,21 +488,39 @@ function incrementMap(map, key, limit) {
   }
 }
 
-function updateCompactIndex(dataRoot, record) {
+function updateLiveIndex(dataRoot, record) {
   if (!record) return;
   try {
-    const indexPath = path.join(dataRoot.root, "indexes", "tool-index.json");
+    const indexPath = path.join(dataRoot.root, "indexes", "live-index.json");
     mkdirp(path.dirname(indexPath));
     let index = {};
     try {
       index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
     } catch (_) {}
-    index.schema_version = 1;
+    index.schema_version = EVENT_SCHEMA_VERSION;
+    index.index_kind = "live_incremental";
     index.generated_at = nowIso();
-    index.window = "incremental";
+    index.warning = "Append-only health index. Use better_tools.py index or summary for authoritative retention-window recommendations.";
     index.records = Number(index.records || 0) + 1;
+    index.record_kinds = index.record_kinds || {};
+    incrementMap(index.record_kinds, record.kind || "unknown", 50);
     index.tool_records = Number(index.tool_records || 0) + (record.kind === "tool_call" ? 1 : 0);
     index.prompt_records = Number(index.prompt_records || 0) + (record.kind === "user_prompt" ? 1 : 0);
+    if (record.kind === "user_prompt") {
+      index.recent_prompts = index.recent_prompts || [];
+      if (record.prompt && record.prompt.prompt_hash) {
+        index.recent_prompts.unshift({
+          observed_at: record.observed_at,
+          task_id: record.ids && record.ids.task_id,
+          prompt_hash: record.prompt.prompt_hash,
+          excerpt: record.prompt.excerpt || "",
+          capture_mode: record.prompt.capture_mode || "unknown",
+        });
+        index.recent_prompts = index.recent_prompts.slice(0, 20);
+      }
+      fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+      return;
+    }
     if (record.kind !== "tool_call") {
       fs.writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
       return;
@@ -464,26 +561,32 @@ function maybePrune(dataRoot) {
       state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
     } catch (_) {}
     if (state.last_pruned_day === today) return;
-    const eventsDir = path.join(dataRoot.root, "events");
-    if (!fs.existsSync(eventsDir)) return;
     const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
-    let files = fs.readdirSync(eventsDir)
-      .filter((name) => name.endsWith(".jsonl"))
-      .map((name) => path.join(eventsDir, name))
-      .map((file) => ({ file, stat: fs.statSync(file) }))
-      .sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs);
-    for (const item of files) {
-      if (item.stat.mtimeMs < cutoff) {
-        try {
-          fs.unlinkSync(item.file);
-        } catch (_) {}
+    const pruneJsonlDir = (dir) => {
+      if (!fs.existsSync(dir)) return [];
+      const kept = [];
+      const items = fs.readdirSync(dir)
+        .filter((name) => name.endsWith(".jsonl"))
+        .map((name) => path.join(dir, name))
+        .map((file) => ({ file, stat: fs.statSync(file) }))
+        .sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs);
+      for (const item of items) {
+        if (item.stat.mtimeMs >= cutoff) kept.push(item);
+        else {
+          try {
+            fs.unlinkSync(item.file);
+          } catch (_) {}
+        }
       }
-    }
-    files = fs.readdirSync(eventsDir)
-      .filter((name) => name.endsWith(".jsonl"))
-      .map((name) => path.join(eventsDir, name))
-      .map((file) => ({ file, stat: fs.statSync(file) }))
-      .sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs);
+      return kept;
+    };
+    let files = pruneJsonlDir(path.join(dataRoot.root, "events"));
+    pruneJsonlDir(path.join(dataRoot.root, "errors"));
+    try {
+      const promptState = readPromptState(dataRoot);
+      promptState.prompts = prunePromptState(promptState.prompts || {});
+      writePromptState(dataRoot, promptState);
+    } catch (_) {}
     let total = files.reduce((sum, item) => sum + item.stat.size, 0);
     for (const item of files) {
       if (total <= MAX_TOTAL_BYTES) break;
@@ -507,7 +610,7 @@ async function main() {
       if (rawMeta.truncated) throw new Error(`stdin exceeded ${MAX_STDIN_BYTES} bytes`);
       const record = buildRecord(JSON.parse(rawMeta.raw || "{}"), rawMeta, dataRoot);
       appendJsonl(path.join(dataRoot.root, "events", `${day}.jsonl`), record);
-      updateCompactIndex(dataRoot, record);
+      updateLiveIndex(dataRoot, record);
     } catch (error) {
       appendJsonl(path.join(dataRoot.root, "errors", `${day}.jsonl`), buildError(error, rawMeta, dataRoot));
     }

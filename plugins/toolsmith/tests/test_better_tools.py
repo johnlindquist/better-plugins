@@ -42,7 +42,7 @@ class BetterToolsTests(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             event_files = list((Path(tmp) / "events").glob("*.jsonl"))
             self.assertEqual(len(event_files), 1)
-            self.assertTrue((Path(tmp) / "indexes" / "tool-index.json").exists())
+            self.assertTrue((Path(tmp) / "indexes" / "live-index.json").exists())
             content = event_files[0].read_text()
             self.assertIn("grep -R TODO", content)
             self.assertNotIn("should-not-leak", content)
@@ -156,10 +156,11 @@ class BetterToolsTests(unittest.TestCase):
             self.assertIn("native macOS Swift", prompt_events[0]["prompt"]["text"])
             self.assertNotIn("secret", json.dumps(events))
             self.assertEqual(
-                tool_events[0]["intent"]["prompt_hash"],
+                tool_events[0]["task"]["prompt_hash"],
                 prompt_events[0]["prompt"]["prompt_hash"],
             )
-            self.assertIn("AXUIElement", tool_events[0]["intent"]["prompt_excerpt"])
+            self.assertEqual(tool_events[0]["task"]["link_method"], "same_turn")
+            self.assertIn("AXUIElement", tool_events[0]["task"]["prompt_excerpt"])
 
     def test_native_intent_does_not_emit_web_blindspot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,8 +200,161 @@ class BetterToolsTests(unittest.TestCase):
                 cwd=str(ROOT),
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("native UI work needs runtime proof", result.stdout)
+            self.assertIn("native macOS/AppKit/AX work needs target-app runtime proof", result.stdout)
             self.assertNotIn("no browser/web verification tools", result.stdout)
+
+    def test_native_macos_prompt_with_context_url_does_not_emit_web_blindspot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["PLUGIN_DATA"] = tmp
+            payloads = [
+                {
+                    "session_id": "s-native",
+                    "turn_id": "t-native",
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": (
+                        "https://cotypist.app/ is context. How did this person figure out text cursor "
+                        "position in a native macOS Accessibility API Swift AppKit app?"
+                    ),
+                },
+                {
+                    "session_id": "s-native",
+                    "turn_id": "t-native",
+                    "tool_use_id": "u-native",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "cwd": str(ROOT),
+                    "tool_input": {"cmd": "swift build"},
+                },
+            ]
+            for payload in payloads:
+                subprocess.run(
+                    ["node", str(CAPTURE)],
+                    input=json.dumps(payload),
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    check=True,
+                )
+            result = subprocess.run(
+                [sys.executable, str(ANALYZE), "summary", "--data-dir", tmp, "--days", "1"],
+                text=True,
+                capture_output=True,
+                check=False,
+                cwd=str(ROOT),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("native_macos", result.stdout)
+            self.assertNotIn("no browser/web verification", result.stdout)
+            self.assertNotIn("web-app/front-end tasks lack browser", result.stdout)
+
+    def test_web_app_prompt_without_browser_tool_emits_web_blindspot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["PLUGIN_DATA"] = tmp
+            payloads = [
+                {
+                    "session_id": "s-web",
+                    "turn_id": "t-web",
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "Fix the React web app page at localhost and verify browser rendering.",
+                },
+                {
+                    "session_id": "s-web",
+                    "turn_id": "t-web",
+                    "tool_use_id": "u-web",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "cwd": str(ROOT),
+                    "tool_input": {"cmd": "npm test"},
+                },
+            ]
+            for payload in payloads:
+                subprocess.run(
+                    ["node", str(CAPTURE)],
+                    input=json.dumps(payload),
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    check=True,
+                )
+            result = subprocess.run(
+                [sys.executable, str(ANALYZE), "summary", "--data-dir", tmp, "--days", "1"],
+                text=True,
+                capture_output=True,
+                check=False,
+                cwd=str(ROOT),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("web-app/front-end tasks lack browser", result.stdout)
+
+    def test_mixed_native_and_web_tasks_are_recommended_per_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["PLUGIN_DATA"] = tmp
+            cases = [
+                ("s-native", "t-native", "Native macOS Accessibility API Swift AppKit cursor bounds work.", "swift build"),
+                ("s-web", "t-web", "React web app DOM rendering bug at localhost.", "npm test"),
+            ]
+            for session_id, turn_id, prompt, command in cases:
+                for payload in (
+                    {
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": prompt,
+                    },
+                    {
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "tool_use_id": f"u-{turn_id}",
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Bash",
+                        "cwd": str(ROOT),
+                        "tool_input": {"cmd": command},
+                    },
+                ):
+                    subprocess.run(
+                        ["node", str(CAPTURE)],
+                        input=json.dumps(payload),
+                        text=True,
+                        capture_output=True,
+                        env=env,
+                        check=True,
+                    )
+            result = subprocess.run(
+                [sys.executable, str(ANALYZE), "summary", "--data-dir", tmp, "--days", "1"],
+                text=True,
+                capture_output=True,
+                check=False,
+                cwd=str(ROOT),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("native_macos", result.stdout)
+            self.assertIn("web-app/front-end tasks lack browser", result.stdout)
+
+    def test_prompt_capture_redacts_secret_like_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["PLUGIN_DATA"] = tmp
+            subprocess.run(
+                ["node", str(CAPTURE)],
+                input=json.dumps({
+                    "session_id": "s-secret",
+                    "turn_id": "t-secret",
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "Run this with API_KEY=should-not-leak for a Swift test.",
+                }),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=True,
+            )
+            data = "\n".join(file.read_text() for file in (Path(tmp) / "events").glob("*.jsonl"))
+            state = (Path(tmp) / "state" / "recent-prompts.json").read_text()
+            self.assertNotIn("should-not-leak", data)
+            self.assertNotIn("should-not-leak", state)
+            self.assertIn("<redacted>", data)
 
 
 if __name__ == "__main__":

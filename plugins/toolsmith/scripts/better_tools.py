@@ -11,6 +11,42 @@ from typing import Any, Iterable, Optional
 
 PLUGIN_NAME = "toolsmith"
 HOME_FALLBACK = Path.home() / ".codex" / "plugin-data" / PLUGIN_NAME
+URL_RE = re.compile(r"https?://\S+", re.I)
+NATIVE_MACOS_SIGNALS = {
+    "macos": 2,
+    "swift": 2,
+    "swiftui": 2,
+    "appkit": 3,
+    "accessibility": 3,
+    "axuielement": 4,
+    "axui": 3,
+    "nswindow": 3,
+    "nspanel": 3,
+    "xcodebuild": 3,
+    "package.swift": 2,
+    ".xcodeproj": 3,
+    "text cursor": 2,
+    "selected text range": 3,
+}
+WEB_APP_SIGNALS = {
+    "web app": 4,
+    "frontend": 3,
+    "front-end": 3,
+    "browser": 3,
+    "dom": 3,
+    "css": 2,
+    "html": 2,
+    "react": 2,
+    "next.js": 2,
+    "vite": 2,
+    "playwright": 4,
+    "puppeteer": 4,
+    "cypress": 4,
+    "localhost": 2,
+    ".tsx": 2,
+    ".jsx": 2,
+    "npm run dev": 3,
+}
 
 
 def locate_data_dir(override: Optional[str] = None) -> Path:
@@ -89,8 +125,13 @@ def command_text(event: dict[str, Any]) -> str:
 
 def prompt_text(event: dict[str, Any]) -> str:
     prompt = event.get("prompt") if isinstance(event.get("prompt"), dict) else {}
-    if isinstance(prompt.get("text"), str):
-        return prompt["text"]
+    for key in ("excerpt", "text"):
+        if isinstance(prompt.get(key), str) and prompt[key]:
+            return prompt[key]
+    task = event.get("task") if isinstance(event.get("task"), dict) else {}
+    if isinstance(task.get("prompt_excerpt"), str) and task["prompt_excerpt"]:
+        return task["prompt_excerpt"]
+    # Backward compatibility with early Toolsmith prompt-link records.
     intent = event.get("intent") if isinstance(event.get("intent"), dict) else {}
     if isinstance(intent.get("prompt_excerpt"), str):
         return intent["prompt_excerpt"]
@@ -106,7 +147,109 @@ def normalize_command(command: str) -> str:
     return value[:220]
 
 
+def classify_intent_text(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    scores: Counter[str] = Counter()
+    signals: dict[str, list[str]] = {"native_macos": [], "web_app": [], "external_reference": []}
+    if URL_RE.search(text):
+        signals["external_reference"].append("url_present")
+    for term, weight in NATIVE_MACOS_SIGNALS.items():
+        if term in lowered:
+            scores["native_macos"] += weight
+            signals["native_macos"].append(term)
+    for term, weight in WEB_APP_SIGNALS.items():
+        if term in lowered:
+            scores["web_app"] += weight
+            signals["web_app"].append(term)
+    domains: list[str] = []
+    if scores["native_macos"] >= 3:
+        domains.append("native_macos")
+    if scores["web_app"] >= 4:
+        domains.append("web_app")
+    if signals["external_reference"]:
+        domains.append("external_reference")
+    primary_domain = "unknown"
+    if scores:
+        primary_domain = scores.most_common(1)[0][0]
+    elif signals["external_reference"]:
+        primary_domain = "external_reference"
+    return {
+        "primary_domain": primary_domain,
+        "domains": domains,
+        "scores": dict(scores),
+        "signals": {key: value for key, value in signals.items() if value},
+        "rules_version": "intent-lexicon-2026-05-22",
+    }
+
+
+def task_key(event: dict[str, Any]) -> str:
+    task = event.get("task") if isinstance(event.get("task"), dict) else {}
+    ids = event.get("ids") if isinstance(event.get("ids"), dict) else {}
+    if isinstance(task.get("task_id"), str) and task["task_id"]:
+        return task["task_id"]
+    if isinstance(ids.get("task_id"), str) and ids["task_id"]:
+        return ids["task_id"]
+    session_id = ids.get("session_id")
+    turn_id = ids.get("turn_id")
+    if session_id and turn_id:
+        return f"session-turn:{session_id}\u001f{turn_id}"
+    return f"event:{ids.get('event_id') or event.get('observed_at') or id(event)}"
+
+
+def build_task_summaries(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tasks: dict[str, dict[str, Any]] = {}
+    for event in events:
+        key = task_key(event)
+        task = tasks.setdefault(
+            key,
+            {
+                "task_key": key,
+                "prompt_excerpt": "",
+                "tool_names": Counter(),
+                "commands": [],
+                "tool_records": 0,
+                "prompt_records": 0,
+                "texts": [],
+            },
+        )
+        kind = str(event.get("kind") or "unknown")
+        text = prompt_text(event)
+        if kind == "user_prompt":
+            task["prompt_records"] += 1
+            if text and not task["prompt_excerpt"]:
+                task["prompt_excerpt"] = text
+            if text:
+                task["texts"].append(text)
+        if kind == "tool_call":
+            task["tool_records"] += 1
+            tool = event.get("tool") if isinstance(event.get("tool"), dict) else {}
+            name = str(tool.get("name") or "unknown")
+            task["tool_names"][name] += 1
+            command = command_text(event)
+            if command:
+                task["commands"].append(command)
+                task["texts"].append(command)
+            if text:
+                task["texts"].append(text)
+                if not task["prompt_excerpt"]:
+                    task["prompt_excerpt"] = text
+    output = []
+    for task in tasks.values():
+        intent = classify_intent_text("\n".join(task["texts"]))
+        output.append({
+            "task_key": task["task_key"],
+            "prompt_excerpt": task["prompt_excerpt"],
+            "tool_names": task["tool_names"],
+            "commands": task["commands"],
+            "tool_records": task["tool_records"],
+            "prompt_records": task["prompt_records"],
+            "intent": intent,
+        })
+    return output
+
+
 def summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
+    tasks = build_task_summaries(events)
     records = Counter()
     tools = Counter()
     families = Counter()
@@ -150,30 +293,67 @@ def summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
         "input_hashes": input_hashes,
         "prompts": prompts,
         "examples": examples,
+        "tasks": tasks,
+        "intent_domains": Counter(
+            task["intent"]["primary_domain"]
+            for task in tasks
+            if task["intent"]["primary_domain"] != "unknown"
+        ),
     }
 
 
-def prompt_has_any(summary: dict[str, Any], terms: tuple[str, ...]) -> bool:
-    text = "\n".join(summary["prompts"].keys()).lower()
-    return any(term in text for term in terms)
+def command_has(commands: Iterable[str], name: str) -> bool:
+    pattern = re.compile(rf"(^|[\s|;&]){re.escape(name)}($|[\s|;&])")
+    return any(pattern.search(command) for command in commands)
+
+
+def tool_blob(task: dict[str, Any]) -> str:
+    return "\n".join(name.lower() for name in task.get("tool_names", {}))
+
+
+def command_blob(task: dict[str, Any]) -> str:
+    return "\n".join(str(command).lower() for command in task.get("commands", []))
+
+
+def is_web_app_task(task: dict[str, Any]) -> bool:
+    return task["intent"]["primary_domain"] == "web_app" or task["intent"]["scores"].get("web_app", 0) >= 4
+
+
+def is_native_macos_task(task: dict[str, Any]) -> bool:
+    return task["intent"]["primary_domain"] == "native_macos" or task["intent"]["scores"].get("native_macos", 0) >= 3
+
+
+def has_browser_runtime_proof(task: dict[str, Any]) -> bool:
+    blob = f"{tool_blob(task)}\n{command_blob(task)}"
+    return any(term in blob for term in ("browser", "playwright", "puppeteer", "selenium", "cypress", "mcp__playwright"))
+
+
+def has_native_build(task: dict[str, Any]) -> bool:
+    blob = command_blob(task)
+    return any(term in blob for term in ("swift build", "swift test", "xcodebuild"))
+
+
+def has_native_runtime_proof(task: dict[str, Any]) -> bool:
+    blob = command_blob(task)
+    return any(term in blob for term in ("swift run", "open -a", "osascript", "screencapture", "log stream", "xcrun simctl", "axuielement"))
 
 
 def recommendations(summary: dict[str, Any]) -> list[str]:
     recs: list[str] = []
-    commands = "\n".join(summary["commands"].keys())
-    tools = summary["tools"]
-    web_intent = prompt_has_any(summary, ("browser", "website", "web app", "frontend", "localhost", "page", "dom", "screenshot"))
-    native_intent = prompt_has_any(summary, ("macos", "swift", "appkit", "accessibility", "axuielement", "nswindow", "nspanel", "textedit", "native"))
-    if "grep" in commands and "rg" not in commands:
+    command_values = list(summary["commands"].keys())
+    if command_has(command_values, "grep") and not command_has(command_values, "rg"):
         recs.append("AGENTS.md: prefer `rg` and `rg --files` over `grep`/`find` for repo search.")
-    if "jq " in commands or "python3 - <<" in commands:
+    if command_has(command_values, "jq") or any("python3 - <<" in command for command in command_values):
         recs.append("script: repeated structured-data shell analysis is a good candidate for a small repo-local helper.")
     if any("git status" in command for command in summary["commands"]):
         recs.append("script: consider a repo-status helper that prints branch, dirty files, and untracked files consistently.")
-    if web_intent and not native_intent and not any("browser" in tool.lower() or "web" in tool.lower() for tool in tools):
-        recs.append("blindspot: no browser/web verification tools appear in the captured PreToolUse corpus.")
-    if native_intent and any("swift " in command or "xcodebuild" in command for command in summary["commands"]):
-        recs.append("blindspot: native UI work needs runtime proof from the target app, not generic browser verification.")
+    tasks = summary.get("tasks", [])
+    web_tasks = [task for task in tasks if is_web_app_task(task)]
+    native_tasks = [task for task in tasks if is_native_macos_task(task)]
+    if web_tasks and not any(has_browser_runtime_proof(task) for task in web_tasks):
+        recs.append("blindspot: web-app/front-end tasks lack browser/runtime verification; add a Playwright/browser smoke path before making UI claims.")
+    if native_tasks and any(has_native_build(task) for task in native_tasks) and not any(has_native_runtime_proof(task) for task in native_tasks):
+        recs.append("blindspot: native macOS/AppKit/AX work needs target-app runtime proof, not generic browser verification; pair `swift build`/`xcodebuild` with an Accessibility-focused smoke against the app under test.")
     if summary["records"] < 10:
         recs.append("data quality: collect more events before making durable tooling decisions.")
     if not recs:
@@ -227,6 +407,23 @@ def render_summary(root: Path, days: int) -> str:
         lines.append("- No prompt intent captured yet.")
     lines.extend([
         "",
+        "## Intent Domains",
+    ])
+    for domain, count in summary["intent_domains"].most_common(10):
+        lines.append(f"- `{domain}`: {count} task(s)")
+    if not summary["intent_domains"]:
+        lines.append("- No task intent domains inferred yet.")
+    lines.extend([
+        "",
+        "## Task Slices",
+    ])
+    for task in summary["tasks"][:10]:
+        excerpt = " ".join((task.get("prompt_excerpt") or "").split())
+        if len(excerpt) > 160:
+            excerpt = excerpt[:157] + "..."
+        lines.append(f"- `{task['intent']['primary_domain']}` tools={task['tool_records']} prompt=`{excerpt or 'none'}`")
+    lines.extend([
+        "",
         "## Top Tools",
     ])
     for name, count in summary["tools"].most_common(15):
@@ -253,7 +450,7 @@ def compact_index(root: Path, days: int) -> dict[str, Any]:
     events = recent_events(root, days)
     summary = summarize(events)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "window_days": days,
         "source_event_files": [str(path) for path in event_files(root)],
@@ -264,9 +461,26 @@ def compact_index(root: Path, days: int) -> dict[str, Any]:
         "duplicate_tool_input_calls": sum(count - 1 for count in summary["input_hashes"].values() if count > 1),
         "top_tools": summary["tools"].most_common(50),
         "top_projects": summary["projects"].most_common(50),
+        "intent_domains": summary["intent_domains"].most_common(20),
         "recent_prompts": [
-            {"prompt": prompt, "count": count}
+            {"prompt_excerpt": prompt[:220], "count": count}
             for prompt, count in summary["prompts"].most_common(20)
+        ],
+        "task_summaries": [
+            {
+                "primary_domain": task["intent"]["primary_domain"],
+                "domains": task["intent"]["domains"],
+                "scores": task["intent"]["scores"],
+                "signals": task["intent"]["signals"],
+                "prompt_excerpt": task["prompt_excerpt"][:220],
+                "tool_records": task["tool_records"],
+                "top_tools": task["tool_names"].most_common(10),
+                "top_command_patterns": [
+                    normalize_command(command.splitlines()[0])
+                    for command in task["commands"][:10]
+                ],
+            }
+            for task in summary["tasks"][:50]
         ],
         "top_command_patterns": [
             {

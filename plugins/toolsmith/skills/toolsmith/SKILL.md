@@ -15,7 +15,9 @@ The companion `PreToolUse` hook stores a rolling corpus under `$PLUGIN_DATA` whe
 ~/.codex/plugin-data/toolsmith/
 ```
 
-The raw store is a capped daily JSONL spool under `events/`. It includes prompt-intent records from `UserPromptSubmit` plus tool-call records from `PreToolUse`. Do not load raw JSONL into the conversation by default. The hook updates `indexes/tool-index.json` automatically, and `better_tools.py index` can regenerate a compact deduped index. Use the index and summaries because they collapse duplicate calls by input hash and normalized command pattern while preserving enough prompt context to avoid intent-blind recommendations.
+The raw store is a capped daily JSONL spool under `events/`. It includes prompt-intent records from `UserPromptSubmit` plus tool-call records from `PreToolUse`. Do not load raw JSONL into the conversation by default.
+
+The hook may also write `indexes/live-index.json`, which is append-only health metadata. Do not treat it as the authoritative recommendation index. Run `better_tools.py index` or `better_tools.py summary` for retention-window recommendations. Use the index and summaries because they collapse duplicate calls by input hash and normalized command pattern while preserving enough prompt context to avoid intent-blind recommendations.
 
 ## Workflow
 
@@ -61,7 +63,13 @@ Capture only the relevant options and subcommands. Do not run mutating commands 
 - `MCP/tool`: a capability gap where structured APIs would beat shell scraping or ad hoc browser work.
 - `defer`: a weak signal that needs more logged events.
 
-6. Guide the user through one improvement at a time. For each proposal, include:
+6. Before declaring a blindspot, inspect task intent. Treat `external_reference` as context, not an implementation target. A URL in the prompt is not enough to recommend browser/web verification.
+
+Only recommend browser/runtime-web verification when the task is classified as web-app, front-end, DOM, browser, or localhost UI work.
+
+For native macOS Swift/AppKit/Accessibility work, recommend native proof instead: build/test plus target-app runtime evidence such as Accessibility permission state, focused AX element, selected text range, bounds/range output, app launch behavior, logs, or native screenshot/smoke evidence.
+
+7. Guide the user through one improvement at a time. For each proposal, include:
 
 - observed evidence from the corpus
 - why the current tool behavior is wasteful or risky
@@ -91,3 +99,5 @@ Prefer this structure:
 ```
 
 Do not dump raw tool arguments unless the user asks. The hook redacts common secret-like keys, but tool arguments may still include sensitive project details.
+
+When using Toolsmith summaries, prefer `Intent Domains` and `Task Slices` over global absence of a tool family. Do not infer a blindspot from missing browser tools across the whole corpus if the relevant task slice is native desktop, CLI, backend, or research-only.
