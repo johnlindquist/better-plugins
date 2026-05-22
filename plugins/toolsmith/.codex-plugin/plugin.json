@@ -1,0 +1,35 @@
+{
+  "name": "toolsmith",
+  "version": "0.1.0",
+  "description": "Observes Codex tool usage and helps improve project tooling over time.",
+  "author": {
+    "name": "John Lindquist"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "hooks",
+    "tools",
+    "observability",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Toolsmith",
+    "shortDescription": "Logs tool usage and turns it into tool-improvement advice.",
+    "longDescription": "Captures Codex PreToolUse events into a local rolling corpus, then provides an analysis skill that identifies tool usage patterns, missing tools, AGENTS.md improvements, and practical software-engineering follow-ups.",
+    "developerName": "John Lindquist",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use toolsmith to analyze this project's tool usage and suggest improvements.",
+      "Run a tool blindspot analysis from the Toolsmith logs.",
+      "Use toolsmith to suggest AGENTS.md updates based on recent tool behavior."
+    ],
+    "brandColor": "#10A37F"
+  }
+}
