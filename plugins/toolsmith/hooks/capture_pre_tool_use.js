@@ -84,6 +84,7 @@ function resolveDataRoot() {
 }
 
 function writeLocator(dataRoot) {
+  if (process.env.TOOLSMITH_WRITE_LOCATOR === "0") return;
   const fallback = stableHomeFallback();
   if (!fallback) return;
   try {

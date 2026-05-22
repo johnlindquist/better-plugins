@@ -14,11 +14,17 @@ SKILL = ROOT / "skills" / "toolsmith" / "SKILL.md"
 README = ROOT.parents[1] / "README.md"
 
 
+def hook_env(data_root: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PLUGIN_DATA"] = data_root
+    env["TOOLSMITH_WRITE_LOCATOR"] = "0"
+    return env
+
+
 class BetterToolsTests(unittest.TestCase):
     def test_capture_writes_daily_jsonl_with_redaction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             payload = {
                 "session_id": "s1",
                 "turn_id": "t1",
@@ -52,8 +58,7 @@ class BetterToolsTests(unittest.TestCase):
 
     def test_analyzer_reports_blindspot_from_sample(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             payload = {
                 "session_id": "s2",
                 "turn_id": "t2",
@@ -85,8 +90,7 @@ class BetterToolsTests(unittest.TestCase):
 
     def test_index_collapses_duplicate_tool_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             payload = {
                 "session_id": "s3",
                 "turn_id": "t3",
@@ -121,8 +125,7 @@ class BetterToolsTests(unittest.TestCase):
 
     def test_prompt_intent_is_attached_to_following_tool_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             prompt_payload = {
                 "session_id": "s4",
                 "turn_id": "t4",
@@ -167,8 +170,7 @@ class BetterToolsTests(unittest.TestCase):
 
     def test_native_intent_does_not_emit_web_blindspot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             payloads = [
                 {
                     "session_id": "s5",
@@ -208,8 +210,7 @@ class BetterToolsTests(unittest.TestCase):
 
     def test_native_macos_prompt_with_context_url_does_not_emit_web_blindspot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             payloads = [
                 {
                     "session_id": "s-native",
@@ -253,8 +254,7 @@ class BetterToolsTests(unittest.TestCase):
 
     def test_web_app_prompt_without_browser_tool_emits_web_blindspot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             payloads = [
                 {
                     "session_id": "s-web",
@@ -295,8 +295,7 @@ class BetterToolsTests(unittest.TestCase):
 
     def test_mixed_native_and_web_tasks_are_recommended_per_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             cases = [
                 ("s-native", "t-native", "Native macOS Accessibility API Swift AppKit cursor bounds work.", "swift build"),
                 ("s-web", "t-web", "React web app DOM rendering bug at localhost.", "npm test"),
@@ -340,8 +339,7 @@ class BetterToolsTests(unittest.TestCase):
 
     def test_prompt_capture_redacts_secret_like_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            env["PLUGIN_DATA"] = tmp
+            env = hook_env(tmp)
             subprocess.run(
                 ["node", str(CAPTURE)],
                 input=json.dumps({
@@ -360,6 +358,25 @@ class BetterToolsTests(unittest.TestCase):
             self.assertNotIn("should-not-leak", data)
             self.assertNotIn("should-not-leak", state)
             self.assertIn("<redacted>", data)
+
+    def test_tests_can_disable_home_locator_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as home:
+            env = hook_env(tmp)
+            env["HOME"] = home
+            subprocess.run(
+                ["node", str(CAPTURE)],
+                input=json.dumps({
+                    "session_id": "s-locator",
+                    "turn_id": "t-locator",
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "locator smoke",
+                }),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=True,
+            )
+            self.assertFalse((Path(home) / ".codex" / "plugin-data" / "toolsmith" / "active-data-root.json").exists())
 
     def test_skill_contains_external_research_contract(self) -> None:
         text = SKILL.read_text()
