@@ -1,0 +1,24 @@
+{
+  "name": "human-view",
+  "version": "0.1.0",
+  "description": "On a '#human' prompt, paints the current Codex task as a live view in a cmux browser pane, updated as the conversation progresses.",
+  "author": { "name": "John Lindquist" },
+  "homepage": "https://github.com/johnlindquist/better-plugins",
+  "repository": "https://github.com/johnlindquist/better-plugins",
+  "license": "MIT",
+  "keywords": ["codex", "cmux", "hooks", "browser", "visualization", "human-view", "daemon"],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Human View",
+    "shortDescription": "Live task visualization in a cmux browser pane (opt-in with #human).",
+    "longDescription": "When a prompt contains the trigger token #human, Human View spawns a tiny loopback HTTP daemon and opens a cmux browser pane showing a task-themed live view. PostToolUse and Stop hooks update a state.json that the page polls every 800ms, so the view live-updates without any further cmux interaction or pane reloads. Sessions that never use #human stay completely dormant.",
+    "developerName": "John Lindquist",
+    "category": "Productivity",
+    "capabilities": ["Hooks", "Automation", "cmux", "Browser"],
+    "defaultPrompt": [
+      "#human build an auth middleware with tests",
+      "#human refactor the parser and show me progress"
+    ],
+    "brandColor": "#7c3aed"
+  }
+}

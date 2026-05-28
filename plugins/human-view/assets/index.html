@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Human View</title>
+<style>
+  :root {
+    --hue: 265;
+    --accent: hsl(var(--hue) 85% 62%);
+    --accent-soft: hsl(var(--hue) 85% 62% / 0.14);
+    --bg0: hsl(var(--hue) 30% 8%);
+    --bg1: hsl(calc(var(--hue) + 40) 32% 12%);
+    --ink: hsl(var(--hue) 25% 96%);
+    --muted: hsl(var(--hue) 14% 68%);
+    --card: hsl(var(--hue) 24% 13% / 0.72);
+    --line: hsl(var(--hue) 30% 70% / 0.14);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 800px at 15% -10%, var(--accent-soft), transparent 60%),
+      linear-gradient(155deg, var(--bg0), var(--bg1));
+    min-height: 100%;
+    padding: clamp(20px, 4vw, 56px);
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    transition: --hue 0.6s ease;
+  }
+  .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .eyebrow {
+    text-transform: uppercase; letter-spacing: 0.22em; font-size: 12px;
+    color: var(--muted); display: flex; align-items: center; gap: 10px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
+         box-shadow: 0 0 0 0 var(--accent); animation: pulse 1.8s infinite; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 hsl(var(--hue) 85% 62% / 0.5); }
+    70% { box-shadow: 0 0 0 12px hsl(var(--hue) 85% 62% / 0); }
+    100% { box-shadow: 0 0 0 0 hsl(var(--hue) 85% 62% / 0); }
+  }
+  h1#title {
+    font-size: clamp(30px, 5.2vw, 60px); line-height: 1.04; margin: 8px 0 0;
+    font-weight: 760; letter-spacing: -0.02em; max-width: 18ch;
+  }
+  .badge {
+    align-self: flex-start; padding: 7px 14px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent);
+    border: 1px solid hsl(var(--hue) 85% 62% / 0.35);
+    font-weight: 650; font-size: 14px; white-space: nowrap;
+  }
+  .glyph {
+    width: clamp(54px, 8vw, 92px); height: clamp(54px, 8vw, 92px); flex: none;
+    color: var(--accent); opacity: 0.9; filter: drop-shadow(0 6px 24px hsl(var(--hue) 85% 50% / 0.4));
+  }
+  .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 18px;
+    padding: 20px 22px; backdrop-filter: blur(8px);
+  }
+  .card h2 {
+    margin: 0 0 12px; font-size: 12.5px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--muted); font-weight: 700;
+  }
+  .detail { font-size: 19px; line-height: 1.5; }
+  .prompt, .summary { font-size: 15.5px; line-height: 1.6; color: var(--ink); white-space: pre-wrap;
+                      max-height: 240px; overflow: auto; }
+  .summary { color: var(--muted); }
+  .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  .timeline li { display: flex; gap: 12px; align-items: baseline; font-size: 14.5px; }
+  .timeline .kind {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent);
+    min-width: 64px; font-weight: 700;
+  }
+  .timeline .what { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .timeline .empty { color: var(--muted); font-style: italic; }
+  footer {
+    margin-top: auto; display: flex; justify-content: space-between; gap: 12px;
+    color: var(--muted); font-size: 12.5px; letter-spacing: 0.04em;
+  }
+  .rev b { color: var(--accent); }
+  #conn { display: inline-flex; align-items: center; gap: 7px; }
+  #conn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #29d398; }
+  #conn.bad::before { background: #ff5d6c; }
+  .flash { animation: flash 0.7s ease; }
+  @keyframes flash { from { background: var(--accent-soft); } to { background: var(--card); } }
+</style>
+</head>
+<body>
+  <div class="top">
+    <div>
+      <div class="eyebrow"><span class="dot"></span><span>Human View · live</span></div>
+      <h1 id="title">Waiting for a task…</h1>
+    </div>
+    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:14px;">
+      <span class="badge" id="phase">Starting</span>
+      <svg class="glyph" id="glyph" viewBox="0 0 100 100" fill="none" aria-hidden="true"></svg>
+    </div>
+  </div>
+
+  <div class="card" id="detailCard">
+    <h2>Status</h2>
+    <div class="detail" id="detail">Booting the human view…</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Current prompt</h2>
+      <div class="prompt" id="prompt">—</div>
+    </div>
+    <div class="card">
+      <h2>Progress</h2>
+      <ul class="timeline" id="timeline"><li class="empty">No activity yet</li></ul>
+    </div>
+  </div>
+
+  <div class="card" id="summaryCard" style="display:none">
+    <h2>Last summary</h2>
+    <div class="summary" id="summary"></div>
+  </div>
+
+  <footer>
+    <span class="rev">revision <b id="rev">0</b> · <span id="updated">—</span></span>
+    <span id="conn">connecting…</span>
+  </footer>
+
+<script>
+(() => {
+  const token = "__TOKEN__";
+  const els = {
+    title: document.getElementById("title"),
+    phase: document.getElementById("phase"),
+    detail: document.getElementById("detail"),
+    detailCard: document.getElementById("detailCard"),
+    prompt: document.getElementById("prompt"),
+    summary: document.getElementById("summary"),
+    summaryCard: document.getElementById("summaryCard"),
+    timeline: document.getElementById("timeline"),
+    rev: document.getElementById("rev"),
+    updated: document.getElementById("updated"),
+    conn: document.getElementById("conn"),
+    glyph: document.getElementById("glyph"),
+  };
+  let seen = -1;
+
+  const SHAPES = {
+    spark:   '<path d="M50 6 L58 42 L94 50 L58 58 L50 94 L42 58 L6 50 L42 42 Z" fill="currentColor"/>',
+    orbit:   '<circle cx="50" cy="50" r="10" fill="currentColor"/><ellipse cx="50" cy="50" rx="42" ry="18" stroke="currentColor" stroke-width="4" fill="none"/><ellipse cx="50" cy="50" rx="18" ry="42" stroke="currentColor" stroke-width="4" fill="none"/>',
+    stack:   '<rect x="20" y="18" width="60" height="16" rx="5" fill="currentColor"/><rect x="20" y="42" width="60" height="16" rx="5" fill="currentColor" opacity="0.7"/><rect x="20" y="66" width="60" height="16" rx="5" fill="currentColor" opacity="0.45"/>',
+    wave:    '<path d="M8 60 Q29 30 50 60 T92 60" stroke="currentColor" stroke-width="6" fill="none"/><path d="M8 78 Q29 48 50 78 T92 78" stroke="currentColor" stroke-width="6" fill="none" opacity="0.5"/>',
+    hex:     '<path d="M50 8 L86 29 L86 71 L50 92 L14 71 L14 29 Z" stroke="currentColor" stroke-width="6" fill="none"/><circle cx="50" cy="50" r="9" fill="currentColor"/>',
+    bolt:    '<path d="M56 6 L24 56 L46 56 L40 94 L78 40 L54 40 Z" fill="currentColor"/>',
+  };
+
+  function text(el, v) { if (el.textContent !== v) el.textContent = v; }
+
+  function renderTimeline(events) {
+    if (!events || !events.length) {
+      els.timeline.innerHTML = '<li class="empty">No activity yet</li>';
+      return;
+    }
+    els.timeline.innerHTML = events.slice(-8).reverse().map(e =>
+      `<li><span class="kind">${escape(e.kind || "·")}</span><span class="what">${escape(e.what || "")}</span></li>`
+    ).join("");
+  }
+
+  function escape(s) {
+    return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  function render(state) {
+    const design = state.design || {};
+    if (typeof design.hue === "number") document.documentElement.style.setProperty("--hue", design.hue);
+    els.glyph.innerHTML = SHAPES[design.shape] || SHAPES.spark;
+
+    text(els.title, state.title || "Codex task");
+    text(els.phase, state.phase || "Working");
+    text(els.detail, state.status_detail || "Working…");
+    text(els.prompt, state.prompt || "—");
+    text(els.rev, state.revision ?? 0);
+    text(els.updated, state.updated_at || "—");
+    renderTimeline(state.events);
+
+    if (state.summary) {
+      els.summaryCard.style.display = "";
+      text(els.summary, state.summary);
+    } else {
+      els.summaryCard.style.display = "none";
+    }
+
+    els.detailCard.classList.remove("flash");
+    void els.detailCard.offsetWidth; // reflow to restart animation
+    els.detailCard.classList.add("flash");
+    document.title = `${state.phase || "Codex"} · ${state.title || "Human View"}`;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch(`/state.json?token=${encodeURIComponent(token)}&t=${Date.now()}`, { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const state = await r.json();
+      els.conn.classList.remove("bad");
+      els.conn.textContent = "live";
+      if (state.revision !== seen) { seen = state.revision; render(state); }
+    } catch (e) {
+      els.conn.classList.add("bad");
+      els.conn.textContent = "reconnecting";
+    }
+  }
+  poll();
+  setInterval(poll, 800);
+})();
+</script>
+</body>
+</html>

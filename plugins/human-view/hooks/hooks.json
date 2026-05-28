@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/human_view_hook.py\"",
+            "timeout": 8,
+            "statusMessage": "Updating human view"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/human_view_hook.py\"",
+            "timeout": 5,
+            "statusMessage": "Updating human view"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/human_view_hook.py\"",
+            "timeout": 5,
+            "statusMessage": "Updating human view"
+          }
+        ]
+      }
+    ]
+  }
+}
