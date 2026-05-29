@@ -39,6 +39,12 @@ def http_json(port: int, token: str) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
+def parse_control(out: str) -> dict:
+    text = out.strip()
+    assert text.startswith("{") and text.endswith("}"), repr(out)
+    return json.loads(text)
+
+
 def main() -> int:
     failures = 0
 
@@ -89,11 +95,46 @@ def main() -> int:
         check("active session keeps updating", st2["revision"] > rev1)
         check("Stop sets phase + summary", st2.get("phase") == "Turn complete" and bool(st2.get("summary")))
 
-        # cleanup: stop daemon
-        try:
-            os.kill(int(meta["pid"]), 15)
-        except Exception:
-            pass
+        # C) per-event control-JSON contract: suppressOutput only on UserPromptSubmit.
+        for event_name, expect_suppress in [
+            ("UserPromptSubmit", True),
+            ("PostToolUse", False),
+            ("Stop", False),
+            ("SomethingFuture", False),
+        ]:
+            payload = {"hook_event_name": event_name, "session_id": f"contract-{event_name}"}
+            if event_name == "UserPromptSubmit":
+                payload["prompt"] = "normal request"
+            elif event_name == "Stop":
+                payload["last_assistant_message"] = "done"
+            else:
+                payload["tool_name"] = "Bash"
+            control = parse_control(run_hook(payload, data))
+            check(f"{event_name} emits continue", control.get("continue") is True)
+            check(
+                f"{event_name} suppressOutput contract",
+                ("suppressOutput" in control) is expect_suppress,
+            )
+
+        # D) redaction: secrets in prompt/summary must not reach served state.
+        run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "secret",
+                  "prompt": "#human run with API_KEY=should-not-leak"}, data)
+        secret_meta = json.loads((data / "sessions" / "secret" / "meta.json").read_text())
+        secret_state = http_json(secret_meta["port"], secret_meta["token"])
+        check("human-view redacts prompt secrets", "should-not-leak" not in json.dumps(secret_state))
+        check("human-view keeps redaction marker", "<redacted>" in json.dumps(secret_state))
+        run_hook({"hook_event_name": "Stop", "session_id": "secret",
+                  "last_assistant_message": "Finished with Bearer abc.def.ghi"}, data)
+        time.sleep(0.2)
+        secret_state_2 = http_json(secret_meta["port"], secret_meta["token"])
+        check("human-view redacts stop summary secrets", "abc.def.ghi" not in json.dumps(secret_state_2))
+
+        # cleanup: stop daemons
+        for stop_meta in (meta, secret_meta):
+            try:
+                os.kill(int(stop_meta["pid"]), 15)
+            except Exception:
+                pass
 
     print(f"\n{'OK' if failures == 0 else 'FAILED'}: {failures} failure(s)")
     return 1 if failures else 0

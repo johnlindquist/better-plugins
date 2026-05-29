@@ -63,6 +63,8 @@ of no HTTP traffic.
 | `.codex-plugin/plugin.json` | Plugin manifest (points at `hooks/hooks.json`) |
 | `hooks/hooks.json`          | Wires `UserPromptSubmit`, `PostToolUse`, `Stop` |
 | `hooks/human_view_hook.py`  | The thin, fast hook (state + daemon + open pane once) |
+| `hooks/hook_control.py`     | Shared per-event control-JSON contract (`suppressOutput` only on `UserPromptSubmit`) |
+| `hooks/redaction.py`        | Best-effort secret redaction for prompt + summary before they reach state |
 | `daemon/human_view_daemon.py` | Loopback HTTP server for `/` + `/state.json` |
 | `assets/index.html`         | The polling human view (unique accent + glyph per task) |
 
@@ -144,3 +146,10 @@ Last automated run: **10/10 checks passed**, including
   `/state.json` with an unguessable per-session token.
 - The hook never focuses or reloads anything; it only opens its own pane once
   with `--focus false`, honoring the cmux non-disruptive rules.
+- The prompt and assistant summary are passed through `redaction.py` before
+  being written to state, so obvious secrets (`API_KEY=…`, `Bearer …`,
+  `https://user:pass@…`, `token: …`) are masked as `<redacted>` on the visible
+  pane. This reduces accidental leakage; it does not prove safety. The page also
+  renders everything with `textContent`, so task text can never inject markup.
+- A top-level `try/except BaseException` guarantees the hook always emits valid
+  control JSON and exits `0`, so a future bug can never block Codex.

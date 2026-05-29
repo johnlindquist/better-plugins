@@ -1,0 +1,7 @@
+{
+  "name": "human-md",
+  "version": "0.1.0",
+  "description": "Live session view as a Markdown file (HUMAN.md) opened in a cmux markdown pane. Trigger with #md.",
+  "author": "better-plugins",
+  "license": "MIT"
+}

@@ -23,6 +23,20 @@ const ENV_SECRET_RE = /\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTH
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
 const BASIC_AUTH_URL_RE = /\b(https?:\/\/)([^\/\s:@]+):([^\/\s@]+)@/gi;
 
+const childProcess = require("child_process");
+const { emitControl } = require("./hook_control");
+// Privacy gate. Default is opt-in: capture stays dormant until a UserPromptSubmit
+// prompt contains the #toolsmith trigger, then the session stays enabled. This
+// establishes the "#<plugin-name> enables the plugin for this session" pattern.
+// TOOLSMITH_CAPTURE_MODE=always restores ambient capture; =off disables it.
+const CAPTURE_MODE = String(process.env.TOOLSMITH_CAPTURE_MODE || "opt-in").toLowerCase();
+const TOOLSMITH_TRIGGER = process.env.TOOLSMITH_TRIGGER || "#toolsmith";
+const DASHBOARD_ENABLED = process.env.TOOLSMITH_DASHBOARD !== "0";
+const DASHBOARD_DAEMON = path.join(__dirname, "..", "daemon", "toolsmith_dashboard_daemon.js");
+
+let currentHookEvent = "PreToolUse";
+let emittedControl = false;
+
 function intEnv(name, fallback) {
   const value = Number.parseInt(process.env[name] || "", 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -507,6 +521,13 @@ function updateLiveIndex(dataRoot, record) {
     incrementMap(index.record_kinds, record.kind || "unknown", 50);
     index.tool_records = Number(index.tool_records || 0) + (record.kind === "tool_call" ? 1 : 0);
     index.prompt_records = Number(index.prompt_records || 0) + (record.kind === "user_prompt" ? 1 : 0);
+    index.redaction = index.redaction || {};
+    index.redaction.redacted_count =
+      Number(index.redaction.redacted_count || 0) +
+      Number((record.redaction && record.redaction.redacted_count) || 0);
+    index.redaction.truncated_count =
+      Number(index.redaction.truncated_count || 0) +
+      Number((record.redaction && record.redaction.truncated_count) || 0);
     if (record.kind === "user_prompt") {
       index.recent_prompts = index.recent_prompts || [];
       if (record.prompt && record.prompt.prompt_hash) {
@@ -600,16 +621,164 @@ function maybePrune(dataRoot) {
   } catch (_) {}
 }
 
+function readJsonFile(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function writeJsonAtomic(filePath, value) {
+  mkdirp(path.dirname(filePath));
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  fs.renameSync(tmp, filePath);
+}
+
+function captureStatePath(dataRoot) {
+  return path.join(dataRoot.root, "state", "capture-sessions.json");
+}
+
+function stripToolsmithTrigger(text) {
+  return String(text || "")
+    .split(TOOLSMITH_TRIGGER)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sanitizedInputForCapture(input) {
+  const copy = { ...input };
+  for (const key of ["prompt", "user_prompt", "message"]) {
+    if (typeof copy[key] === "string") {
+      copy[key] = stripToolsmithTrigger(copy[key]);
+    }
+  }
+  return copy;
+}
+
+function sessionKey(input) {
+  return String(input.session_id || "default");
+}
+
+// Decide whether to capture this event, and return the trigger-stripped input.
+// opt-in (default): dormant per session until a UserPromptSubmit prompt contains
+// the #toolsmith trigger; once enabled the session stays enabled (sticky).
+function captureDecision(input, dataRoot) {
+  const sanitized = sanitizedInputForCapture(input);
+  if (CAPTURE_MODE === "off") {
+    return { capture: false, input: sanitized, reason: "mode_off" };
+  }
+  if (CAPTURE_MODE === "always") {
+    return { capture: true, input: sanitized, reason: "mode_always" };
+  }
+  const eventName = String(input.hook_event_name || "PreToolUse");
+  const sessionId = sessionKey(input);
+  const prompt = eventName === "UserPromptSubmit" ? promptFromInput(input) : "";
+  const stateFile = captureStatePath(dataRoot);
+  const state = readJsonFile(stateFile, { schema_version: 1, sessions: {} });
+  state.sessions = state.sessions || {};
+  const session = state.sessions[sessionId] || {};
+  const triggered = eventName === "UserPromptSubmit" && prompt.includes(TOOLSMITH_TRIGGER);
+  if (triggered && !session.active) {
+    state.sessions[sessionId] = { active: true, updated_at: nowIso() };
+    writeJsonAtomic(stateFile, state);
+    return { capture: true, input: sanitized, reason: "session_enabled" };
+  }
+  return {
+    capture: Boolean(session.active),
+    input: sanitized,
+    reason: session.active ? "session_active" : "dormant",
+  };
+}
+
+function dashboardDir(dataRoot) {
+  return path.join(dataRoot.root, "dashboard");
+}
+
+function dashboardActivePath(dataRoot) {
+  return path.join(dashboardDir(dataRoot), "active");
+}
+
+function dashboardMetaPath(dataRoot) {
+  return path.join(dashboardDir(dataRoot), "meta.json");
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function ensureDashboardDaemon(dataRoot) {
+  try {
+    const meta = readJsonFile(dashboardMetaPath(dataRoot), {});
+    if (meta.pid && meta.port && pidAlive(meta.pid)) return;
+    mkdirp(dashboardDir(dataRoot));
+    const child = childProcess.spawn(process.execPath, [DASHBOARD_DAEMON, "--data-root", dataRoot.root], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    });
+    child.unref();
+  } catch (_) {}
+}
+
+// The hook only flags the dashboard active and spawns the daemon detached; the
+// daemon opens the cmux pane asynchronously, so the hook stays inside its 2s
+// budget. Called only for #toolsmith-enabled sessions.
+function maybeActivateDashboard(dataRoot) {
+  try {
+    mkdirp(dashboardDir(dataRoot));
+    fs.writeFileSync(dashboardActivePath(dataRoot), `${nowIso()}\n`, "utf8");
+    ensureDashboardDaemon(dataRoot);
+  } catch (_) {}
+}
+
+function finish(eventName) {
+  if (!emittedControl) {
+    try {
+      emitControl(eventName || currentHookEvent || "PreToolUse");
+    } catch (_) {}
+    emittedControl = true;
+  }
+  process.exit(0);
+}
+
 async function main() {
   const dataRoot = resolveDataRoot();
+  let rawMeta = { raw: "", bytes: 0, truncated: false };
+  let input = {};
+  let parseError = null;
   try {
+    rawMeta = await readStdinLimited();
+    try {
+      input = JSON.parse(rawMeta.raw || "{}");
+    } catch (error) {
+      parseError = error;
+    }
+    currentHookEvent = String(input.hook_event_name || "PreToolUse");
+
+    const decision = captureDecision(input, dataRoot);
+    if (!decision.capture) {
+      return currentHookEvent;
+    }
+    input = decision.input;
+
     mkdirp(dataRoot.root);
     writeLocator(dataRoot);
-    const rawMeta = await readStdinLimited();
+    if (DASHBOARD_ENABLED && (decision.reason === "session_enabled" || decision.reason === "session_active")) {
+      maybeActivateDashboard(dataRoot);
+    }
     const day = dayStamp();
     try {
       if (rawMeta.truncated) throw new Error(`stdin exceeded ${MAX_STDIN_BYTES} bytes`);
-      const record = buildRecord(JSON.parse(rawMeta.raw || "{}"), rawMeta, dataRoot);
+      if (parseError) throw parseError;
+      const record = buildRecord(input, rawMeta, dataRoot);
       appendJsonl(path.join(dataRoot.root, "events", `${day}.jsonl`), record);
       updateLiveIndex(dataRoot, record);
     } catch (error) {
@@ -617,8 +786,11 @@ async function main() {
     }
     maybePrune(dataRoot);
   } catch (_) {}
+  return currentHookEvent;
 }
 
-process.on("uncaughtException", () => process.exit(0));
-process.on("unhandledRejection", () => process.exit(0));
-main().finally(() => process.exit(0));
+process.on("uncaughtException", () => finish(currentHookEvent));
+process.on("unhandledRejection", () => finish(currentHookEvent));
+main()
+  .then((eventName) => finish(eventName))
+  .catch(() => finish(currentHookEvent));

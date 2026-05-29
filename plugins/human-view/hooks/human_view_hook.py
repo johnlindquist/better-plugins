@@ -24,6 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# hook_control.py and redaction.py are siblings in this hooks/ directory. When a
+# script is run directly its directory is normally sys.path[0], but insert it
+# explicitly so the imports work no matter how Codex launches the hook.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hook_control import emit_control  # noqa: E402
+from redaction import redact_text  # noqa: E402
+
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 DAEMON = PLUGIN_ROOT / "daemon" / "human_view_daemon.py"
 SHAPES = ["spark", "orbit", "stack", "wave", "hex", "bolt"]
@@ -35,17 +42,26 @@ MAX_EVENTS = 40
 TRIGGER = os.environ.get("HUMAN_VIEW_TRIGGER", "#human")
 
 
-def emit(event: str) -> None:
-    """Print the hook's control JSON.
+CURRENT_EVENT = "UserPromptSubmit"
+EMITTED_CONTROL = False
 
-    Codex only accepts the `suppressOutput` field on UserPromptSubmit hooks
-    ("suppressOutput field is only supported on UserPromptSubmit hooks"), so it
-    must be omitted for PostToolUse / Stop / everything else.
+
+def safe_emit(event: str | None) -> None:
+    """Emit the hook's control JSON exactly once, never raising.
+
+    Uses the shared hook_control contract: `suppressOutput` is only valid on
+    UserPromptSubmit hooks ("suppressOutput field is only supported on
+    UserPromptSubmit hooks"), so it is omitted for every other event. Guarded so
+    a crash-path emit can never double-print or block Codex.
     """
-    out: dict[str, Any] = {"continue": True}
-    if event == "UserPromptSubmit":
-        out["suppressOutput"] = True
-    print(json.dumps(out, separators=(",", ":")))
+    global EMITTED_CONTROL
+    if EMITTED_CONTROL:
+        return
+    try:
+        emit_control(event)
+    except Exception:
+        pass
+    EMITTED_CONTROL = True
 
 
 def now_iso() -> str:
@@ -196,12 +212,12 @@ def update_state(state: dict[str, Any], event: str, payload: dict[str, Any]) -> 
     state["updated_at"] = now_iso()
 
     if event == "UserPromptSubmit":
-        prompt = strip_trigger(payload.get("prompt", "") or "")
+        prompt = redact_text(strip_trigger(payload.get("prompt", "") or ""), 1200)
         if not state.get("title"):
             state["title"] = derive_title(prompt)
             state["design"] = derive_design(prompt)
         state["phase"] = "Working"
-        state["prompt"] = prompt[:1200]
+        state["prompt"] = prompt
         state["status_detail"] = "New task received — getting to work"
         state.pop("summary", None)
         append_event(state, "prompt", (prompt[:90] or "(empty)"))
@@ -214,9 +230,9 @@ def update_state(state: dict[str, Any], event: str, payload: dict[str, Any]) -> 
         append_event(state, "tool", str(tool)[:90])
     elif event == "Stop":
         state["phase"] = "Turn complete"
-        msg = payload.get("last_assistant_message", "") or ""
+        msg = redact_text(payload.get("last_assistant_message", "") or "", 1500)
         if msg:
-            state["summary"] = msg[:1500]
+            state["summary"] = msg
         state["status_detail"] = "Ready for the next turn"
         append_event(state, "done", "turn complete")
     else:
@@ -226,8 +242,10 @@ def update_state(state: dict[str, Any], event: str, payload: dict[str, Any]) -> 
 
 
 def main() -> int:
+    global CURRENT_EVENT
     payload = read_payload()
     event = payload.get("hook_event_name", "UserPromptSubmit")
+    CURRENT_EVENT = event
     session_id = payload.get("session_id", "") or "default"
 
     try:
@@ -238,7 +256,7 @@ def main() -> int:
         # Gate: stay completely dormant until a prompt opts in with the trigger
         # token. Once a session is active, keep updating on every later event.
         if not active_flag.exists() and not triggered:
-            emit(event)
+            safe_emit(event)
             return 0
 
         sd.mkdir(parents=True, exist_ok=True)
@@ -257,9 +275,19 @@ def main() -> int:
     except Exception as e:
         debug(f"hook error: {e!r}")
 
-    emit(event)
+    safe_emit(event)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BaseException as exc:  # noqa: BLE001 - never let a hook block Codex
+        if isinstance(exc, SystemExit):
+            raise
+        try:
+            debug(f"fatal hook error: {exc!r}")
+        except Exception:
+            pass
+        safe_emit(CURRENT_EVENT)
+        raise SystemExit(0)

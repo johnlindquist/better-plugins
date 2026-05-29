@@ -19,6 +19,14 @@ The raw store is a capped daily JSONL spool under `events/`. It includes prompt-
 
 The hook may also write `indexes/live-index.json`, which is append-only health metadata. Do not treat it as the authoritative recommendation index. Run `better_tools.py index` or `better_tools.py summary` for retention-window recommendations. Use the index and summaries because they collapse duplicate calls by input hash and normalized command pattern while preserving enough prompt context to avoid intent-blind recommendations.
 
+## Enabling capture & the live dashboard
+
+Capture is **opt-in per session**: it stays dormant until a prompt contains the `#toolsmith` trigger, then stays enabled (sticky) for the rest of that session. This mirrors the `#human` convention used by the human-view plugin; the `#toolsmith` token is stripped before the prompt is stored. `TOOLSMITH_CAPTURE_MODE` overrides the gate: `opt-in` (default), `always` (legacy ambient capture), or `off`.
+
+Enabling a session also starts an optional **live dashboard** — a loopback HTTP daemon (`daemon/toolsmith_dashboard_daemon.js`) that opens a cmux browser pane and serves **aggregate-only** health on `127.0.0.1` behind a token: total records, tool calls, duplicate-input and redaction counts, and top tools/projects. Raw prompt text and raw tool input are intentionally never served. Set `TOOLSMITH_DASHBOARD=0` to disable it, or `TOOLSMITH_DASHBOARD_OPEN_BROWSER=0` to run it headless.
+
+Every hook invocation emits exactly one control-JSON object on stdout via `hooks/hook_control.js`: `{"continue":true,"suppressOutput":true}` for `UserPromptSubmit`, `{"continue":true}` for all other events (`suppressOutput` is only valid on `UserPromptSubmit`).
+
 ## Workflow
 
 1. Run the analyzer from the plugin root:

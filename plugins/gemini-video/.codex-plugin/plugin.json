@@ -1,0 +1,7 @@
+{
+  "name": "gemini-video",
+  "schemaname": "gemini-video",
+  "description": "Detects .mp4 paths in prompts/tool calls and summarizes them with Gemini in a detached worker.",
+  "version": "0.1.0",
+  "hooks": "hooks/hooks.json"
+}

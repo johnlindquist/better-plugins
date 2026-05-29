@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Toolsmith Live</title>
+<style>
+  body { margin: 0; padding: 24px; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: #101114; color: #f4f4f5; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #a1a1aa; margin: 0 0 8px; }
+  .muted { color: #a1a1aa; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+  .card { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 14px; }
+  .value { font-size: 28px; font-weight: 700; }
+  ul { padding-left: 18px; margin: 8px 0 0; }
+  li { margin: 4px 0; }
+</style>
+</head>
+<body>
+  <h1>Toolsmith Live</h1>
+  <div class="muted" id="status">Connecting…</div>
+  <div class="muted" style="font-size:12px" id="warning"></div>
+  <div class="grid">
+    <div class="card"><div class="muted">Records</div><div class="value" id="records">0</div></div>
+    <div class="card"><div class="muted">Tool calls</div><div class="value" id="tool_records">0</div></div>
+    <div class="card"><div class="muted">Duplicate tool inputs</div><div class="value" id="duplicates">0</div></div>
+    <div class="card"><div class="muted">Redactions</div><div class="value" id="redactions">0</div></div>
+  </div>
+  <div class="card">
+    <h2>Top tools</h2>
+    <ul id="top_tools"></ul>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h2>Top projects</h2>
+    <ul id="top_projects"></ul>
+  </div>
+<script>
+  const TOKEN = "__TOKEN__";
+  function setText(id, value) { document.getElementById(id).textContent = String(value ?? ""); }
+  function renderList(id, items) {
+    const node = document.getElementById(id);
+    node.replaceChildren();
+    for (const item of items || []) {
+      const li = document.createElement("li");
+      li.textContent = `${item.name}: ${item.count}`;
+      node.appendChild(li);
+    }
+    if (!items || items.length === 0) {
+      const li = document.createElement("li");
+      li.textContent = "No data yet";
+      node.appendChild(li);
+    }
+  }
+  async function tick() {
+    try {
+      const res = await fetch(`/state.json?token=${encodeURIComponent(TOKEN)}`, { cache: "no-store" });
+      const data = await res.json();
+      setText("status", `Updated ${data.generated_at}`);
+      setText("warning", data.warning || "");
+      setText("records", data.totals.records);
+      setText("tool_records", data.totals.tool_records);
+      setText("duplicates", data.totals.duplicate_tool_input_calls);
+      setText("redactions", data.redaction.redacted_count);
+      renderList("top_tools", data.top_tools);
+      renderList("top_projects", data.top_projects);
+    } catch (error) {
+      setText("status", `Disconnected: ${error}`);
+    }
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>

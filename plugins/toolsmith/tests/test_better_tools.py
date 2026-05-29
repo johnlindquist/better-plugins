@@ -3,7 +3,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import urllib.request
 from pathlib import Path
 
 
@@ -18,10 +20,23 @@ def hook_env(data_root: str) -> dict[str, str]:
     env = os.environ.copy()
     env["PLUGIN_DATA"] = data_root
     env["TOOLSMITH_WRITE_LOCATOR"] = "0"
+    # Existing capture tests predate the opt-in privacy gate, so force the legacy
+    # ambient-capture behavior and keep the dashboard daemon out of unit runs.
+    env["TOOLSMITH_CAPTURE_MODE"] = "always"
+    env["TOOLSMITH_DASHBOARD"] = "0"
     return env
 
 
 class BetterToolsTests(unittest.TestCase):
+    def parse_control(self, result: "subprocess.CompletedProcess[str]") -> dict:
+        """Assert the hook emitted exactly one valid control JSON object."""
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        text = result.stdout.strip()
+        self.assertTrue(text.startswith("{") and text.endswith("}"), repr(result.stdout))
+        self.assertEqual(text.count("{"), 1, repr(result.stdout))
+        return json.loads(text)
+
     def test_capture_writes_daily_jsonl_with_redaction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = hook_env(tmp)
@@ -46,8 +61,9 @@ class BetterToolsTests(unittest.TestCase):
                 env=env,
                 check=False,
             )
-            self.assertEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, "")
+            control = self.parse_control(result)
+            self.assertEqual(control.get("continue"), True)
+            self.assertNotIn("suppressOutput", control)
             event_files = list((Path(tmp) / "events").glob("*.jsonl"))
             self.assertEqual(len(event_files), 1)
             self.assertTrue((Path(tmp) / "indexes" / "live-index.json").exists())
@@ -415,6 +431,174 @@ class BetterToolsTests(unittest.TestCase):
         ]
         for needle in required:
             self.assertIn(needle, text)
+
+    def test_hook_control_json_contract_by_event(self) -> None:
+        cases = [
+            ("UserPromptSubmit", True),
+            ("PreToolUse", False),
+            ("PostToolUse", False),
+            ("Stop", False),
+            ("SomethingFuture", False),
+        ]
+        for event_name, expect_suppress in cases:
+            with self.subTest(event_name=event_name), tempfile.TemporaryDirectory() as tmp:
+                env = hook_env(tmp)
+                payload = {
+                    "session_id": f"s-{event_name}",
+                    "turn_id": f"t-{event_name}",
+                    "hook_event_name": event_name,
+                    "cwd": str(ROOT),
+                }
+                if event_name == "UserPromptSubmit":
+                    payload["prompt"] = "contract test API_KEY=should-not-leak"
+                else:
+                    payload.update({
+                        "tool_use_id": f"u-{event_name}",
+                        "tool_name": "Bash",
+                        "tool_input": {"cmd": "echo ok", "api_key": "should-not-leak"},
+                    })
+                result = subprocess.run(
+                    ["node", str(CAPTURE)],
+                    input=json.dumps(payload),
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    check=False,
+                )
+                control = self.parse_control(result)
+                self.assertEqual(control.get("continue"), True)
+                if expect_suppress:
+                    self.assertEqual(control.get("suppressOutput"), True)
+                else:
+                    self.assertNotIn("suppressOutput", control)
+                self.assertNotIn("should-not-leak", result.stdout)
+
+    def test_opt_in_dormant_until_toolsmith_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = hook_env(tmp)
+            env["TOOLSMITH_CAPTURE_MODE"] = "opt-in"
+            dormant = subprocess.run(
+                ["node", str(CAPTURE)],
+                input=json.dumps({
+                    "session_id": "s-opt",
+                    "turn_id": "t-opt-0",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "cwd": str(ROOT),
+                    "tool_input": {"cmd": "echo dormant"},
+                }),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+            self.parse_control(dormant)
+            self.assertFalse((Path(tmp) / "events").exists())
+
+            enabled = subprocess.run(
+                ["node", str(CAPTURE)],
+                input=json.dumps({
+                    "session_id": "s-opt",
+                    "turn_id": "t-opt-1",
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "#toolsmith begin capture API_KEY=should-not-leak",
+                }),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+            control = self.parse_control(enabled)
+            self.assertEqual(control.get("suppressOutput"), True)
+
+            subprocess.run(
+                ["node", str(CAPTURE)],
+                input=json.dumps({
+                    "session_id": "s-opt",
+                    "turn_id": "t-opt-2",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "cwd": str(ROOT),
+                    "tool_input": {"cmd": "echo after enable"},
+                }),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+            content = "\n".join(file.read_text() for file in (Path(tmp) / "events").glob("*.jsonl"))
+            self.assertIn("begin capture", content)
+            self.assertNotIn("#toolsmith", content)
+            self.assertNotIn("should-not-leak", content)
+            self.assertIn("after enable", content)
+            self.assertNotIn("dormant", content)
+
+    def test_dashboard_daemon_serves_aggregate_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = hook_env(tmp)
+            env["TOOLSMITH_CAPTURE_MODE"] = "opt-in"
+            env["TOOLSMITH_DASHBOARD"] = "1"
+            env["TOOLSMITH_DASHBOARD_OPEN_BROWSER"] = "0"
+            enable = subprocess.run(
+                ["node", str(CAPTURE)],
+                input=json.dumps({
+                    "session_id": "s-dash",
+                    "turn_id": "t-dash-1",
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "#toolsmith open the live dashboard",
+                }),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+            self.parse_control(enable)
+            meta_path = Path(tmp) / "dashboard" / "meta.json"
+            meta = None
+            for _ in range(50):
+                if meta_path.exists():
+                    meta = json.loads(meta_path.read_text())
+                    if meta.get("port") and meta.get("token"):
+                        break
+                time.sleep(0.1)
+            self.assertIsNotNone(meta, "dashboard daemon did not publish meta.json")
+            self.assertTrue(meta.get("port") and meta.get("token"))
+            try:
+                subprocess.run(
+                    ["node", str(CAPTURE)],
+                    input=json.dumps({
+                        "session_id": "s-dash",
+                        "turn_id": "t-dash-2",
+                        "hook_event_name": "PreToolUse",
+                        "tool_use_id": "u-dash",
+                        "tool_name": "Bash",
+                        "cwd": str(ROOT),
+                        "tool_input": {"cmd": "echo dashboard", "api_key": "should-not-leak"},
+                    }),
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    check=False,
+                )
+                state_url = f"http://127.0.0.1:{meta['port']}/state.json?token={meta['token']}"
+                state: dict = {}
+                for _ in range(30):
+                    with urllib.request.urlopen(state_url, timeout=2) as response:
+                        state = json.loads(response.read().decode("utf-8"))
+                    if state.get("totals", {}).get("tool_records", 0) >= 1:
+                        break
+                    time.sleep(0.1)
+                dumped = json.dumps(state)
+                self.assertGreaterEqual(state["totals"]["records"], 2)
+                self.assertGreaterEqual(state["totals"]["tool_records"], 1)
+                self.assertTrue(any(item["name"] == "Bash" for item in state["top_tools"]))
+                self.assertNotIn("should-not-leak", dumped)
+                self.assertNotIn("open the live dashboard", dumped)
+            finally:
+                try:
+                    os.kill(int(meta["pid"]), 15)
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
